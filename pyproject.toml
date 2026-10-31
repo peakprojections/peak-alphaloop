@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "peak-video-editor"
+version = "0.1.0"
+description = "Peak Projections tool that keys black or white video backgrounds to alpha (WebM VP9 / ProRes 4444)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pillow>=10",
+    "scipy>=1.11",
+]
+
+[project.scripts]
+peak-video-editor = "peak_video_editor.server:main"
+peak-key = "peak_video_editor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["peak_video_editor*"]
+
+[tool.setuptools.package-data]
+peak_video_editor = ["static/*"]

@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peak Video Editor</title>
+<style>
+  :root {
+    --bg: #0d1016; --panel: #151a23; --panel-2: #1c2330; --line: #283142;
+    --text: #e8ecf3; --muted: #8b97ab; --accent: #4aa8ff; --accent-2: #2f7fd1;
+    --good: #46c28b; --bad: #ff6b6b; --radius: 10px;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-size: 14px; }
+  button, input, select { font: inherit; color: inherit; }
+  .app { display: grid; grid-template-columns: 1fr 340px; height: 100vh; }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 12px 18px;
+           border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  header .ver { color: var(--muted); font-size: 12px; }
+  header .clipname { margin-left: auto; color: var(--muted); font-size: 13px; white-space: nowrap;
+                     overflow: hidden; text-overflow: ellipsis; max-width: 50vw; }
+  .app { grid-template-rows: auto 1fr; }
+
+  /* stage */
+  .stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 16px; gap: 12px; }
+  .viewbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--line);
+         border-radius: 8px; padding: 2px; }
+  .seg button { border: 0; background: none; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+                color: var(--muted); }
+  .seg button.on { background: var(--accent-2); color: #fff; }
+  .seg button:disabled { opacity: .4; cursor: default; }
+  .label { color: var(--muted); font-size: 12px; }
+  .canvas { flex: 1; min-height: 0; border-radius: var(--radius); border: 1px solid var(--line);
+            display: grid; place-items: center; overflow: hidden; position: relative; }
+  .canvas.checker { background-color: #2a2f38;
+    background-image: linear-gradient(45deg, #3a414d 25%, transparent 25%),
+      linear-gradient(-45deg, #3a414d 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #3a414d 75%),
+      linear-gradient(-45deg, transparent 75%, #3a414d 75%);
+    background-size: 24px 24px; background-position: 0 0, 0 12px, 12px -12px, -12px 0; }
+  .canvas img, .canvas video { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+  .canvas .busy { position: absolute; top: 10px; right: 12px; font-size: 12px; color: var(--muted);
+                  background: rgba(0,0,0,.45); padding: 3px 8px; border-radius: 6px; display: none; }
+  .canvas.loading .busy { display: block; }
+  .drop { position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+          color: var(--muted); padding: 24px; }
+  .drop strong { display: block; color: var(--text); font-size: 18px; margin-bottom: 6px; }
+  .canvas.dragging { outline: 2px dashed var(--accent); outline-offset: -8px; }
+  .timeline { display: flex; align-items: center; gap: 12px; }
+  .timeline input { flex: 1; }
+  .time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 110px; text-align: right; }
+
+  /* side panel */
+  aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 16px;
+          display: flex; flex-direction: column; gap: 18px; }
+  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
+               margin: 0 0 10px; font-weight: 600; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border-radius: 8px;
+         border: 1px solid var(--line); background: var(--panel-2); padding: 9px 14px; cursor: pointer;
+         text-decoration: none; color: var(--text); }
+  .btn:hover { border-color: #3a4558; }
+  .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #fff; font-weight: 600; }
+  .btn.primary:hover { background: var(--accent); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.wide { width: 100%; }
+  .info { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 8px; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .choice { border: 1px solid var(--line); border-radius: 8px; padding: 10px; cursor: pointer;
+            background: var(--panel-2); text-align: left; }
+  .choice.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .choice b { display: block; font-size: 13px; }
+  .choice span { color: var(--muted); font-size: 11.5px; }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px;
+            margin-right: 6px; border: 1px solid #555; }
+  .slider { margin-bottom: 12px; }
+  .slider .top { display: flex; justify-content: space-between; margin-bottom: 4px; }
+  .slider .val { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .slider .hint { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .check { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 10px; cursor: pointer; }
+  .check input { margin-top: 2px; accent-color: var(--accent); }
+  .check span { color: var(--muted); font-size: 11.5px; display: block; }
+  .progress { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin: 10px 0 6px; }
+  .progress div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .status { font-size: 12px; color: var(--muted); min-height: 16px; }
+  .status.err { color: var(--bad); }
+  .status.ok { color: var(--good); }
+  .result { display: none; margin-top: 10px; gap: 8px; flex-direction: column; }
+  .result.show { display: flex; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Peak Video Editor</h1><span class="ver" id="version"></span>
+    <span class="clipname" id="clipname">No video loaded</span>
+  </header>
+
+  <main class="stage">
+    <div class="viewbar">
+      <div class="seg" id="viewSeg">
+        <button data-view="result" class="on">Result</button>
+        <button data-view="matte">Alpha matte</button>
+        <button data-view="original">Original</button>
+      </div>
+      <span class="label">Show over</span>
+      <div class="seg" id="backdropSeg">
+        <button data-backdrop="checker" class="on">Checker</button>
+        <button data-backdrop="#7a1f2b">Red</button>
+        <button data-backdrop="#1d5f3a">Green</button>
+        <button data-backdrop="#ffffff">White</button>
+        <button data-backdrop="#000000">Black</button>
+      </div>
+    </div>
+
+    <div class="canvas checker" id="canvas">
+      <div class="drop" id="drop">
+        <div><strong>Drop a video here</strong>or use <em>Open video</em> on the right.<br>
+          Footage should be shot or rendered on a solid black or white background.</div>
+      </div>
+      <img id="preview" alt="" class="hidden">
+      <video id="playback" class="hidden" controls loop muted playsinline></video>
+      <div class="busy">Updating…</div>
+    </div>
+
+    <div class="timeline">
+      <input type="range" id="time" min="0" max="1000" value="0" disabled>
+      <span class="time" id="timeLabel">0:00.00 / 0:00.00</span>
+    </div>
+  </main>
+
+  <aside>
+    <section>
+      <h2>Source</h2>
+      <input type="file" id="file" accept="video/*,.mov,.mkv,.webm,.mp4,.avi" class="hidden">
+      <button class="btn wide" id="openBtn">Open video…</button>
+      <div class="info" id="clipInfo"></div>
+    </section>
+
+    <section>
+      <h2>Background to remove</h2>
+      <div class="row" id="bgSeg">
+        <button class="choice on" data-bg="black"><b><i class="swatch" style="background:#000"></i>Black</b></button>
+        <button class="choice" data-bg="white"><b><i class="swatch" style="background:#fff"></i>White</b></button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Key style</h2>
+      <div class="row" id="presetSeg">
+        <button class="choice on" data-preset="soft"><b>Soft</b><span>Glows, smoke, light, particles</span></button>
+        <button class="choice" data-preset="hard"><b>Hard</b><span>Solid objects, logos, people</span></button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Fine tune</h2>
+      <div class="slider">
+        <div class="top"><label for="threshold">Threshold</label><span class="val" id="thresholdVal"></span></div>
+        <input type="range" id="threshold" min="0" max="0.6" step="0.005">
+        <div class="hint">Raise to remove noise or a not-quite-pure background.</div>
+      </div>
+      <div class="slider">
+        <div class="top"><label for="softness">Softness</label><span class="val" id="softnessVal"></span></div>
+        <input type="range" id="softness" min="0.005" max="1" step="0.005">
+        <div class="hint">High = smooth see-through falloff. Low = crisp cutout.</div>
+      </div>
+      <label class="check"><input type="checkbox" id="unblend">
+        <div>Remove edge fringe<span>Recovers true edge colors so no dark or light halo remains.</span></div></label>
+      <label class="check"><input type="checkbox" id="protect">
+        <div>Protect interior<span>Only remove background touching the frame edge, so dark parts of the subject stay solid.</span></div></label>
+    </section>
+
+    <section>
+      <h2>Export</h2>
+      <div class="row" id="formatSeg">
+        <button class="choice on" data-format="webm"><b>WebM</b><span>VP9 + alpha · small files</span></button>
+        <button class="choice" data-format="prores"><b>ProRes 4444</b><span>.mov · large, lossless-ish</span></button>
+      </div>
+      <div class="slider" id="crfBox" style="margin-top:12px">
+        <div class="top"><label for="crf">WebM quality</label><span class="val" id="crfVal"></span></div>
+        <input type="range" id="crf" min="15" max="45" step="1">
+        <div class="hint">Lower = better quality and larger file. 30 is a good default.</div>
+      </div>
+      <button class="btn primary wide" id="exportBtn" disabled style="margin-top:4px">Export video</button>
+      <div class="progress"><div id="bar"></div></div>
+      <div class="status" id="status"></div>
+      <div class="result" id="result">
+        <a class="btn wide" id="download" href="#">Download</a>
+        <button class="btn wide" id="playBtn">Play result in preview</button>
+        <button class="btn wide hidden" id="cancelBtn">Cancel</button>
+      </div>
+      <button class="btn wide hidden" id="cancelRun" style="margin-top:8px">Cancel export</button>
+    </section>
+  </aside>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = {
+  clip: null, view: "result", backdrop: "checker", preset: "soft", format: "webm",
+  settings: { background: "black", threshold: 0.03, softness: 0.97, unblend: true, protect_interior: false },
+  presets: {}, crf: 30, job: null, previewToken: 0,
+};
+
+async function api(path, options = {}) {
+  const response = await fetch(path, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+function fmtTime(s) {
+  const m = Math.floor(s / 60), r = s - m * 60;
+  return `${m}:${r.toFixed(2).padStart(5, "0")}`;
+}
+function fmtBytes(n) {
+  const u = ["B", "KB", "MB", "GB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+function setStatus(text, kind = "") { const el = $("status"); el.textContent = text; el.className = "status " + kind; }
+
+function selectIn(groupId, attr, value) {
+  for (const b of $(groupId).querySelectorAll(`[data-${attr}]`)) b.classList.toggle("on", b.dataset[attr] === value);
+}
+
+function syncControls() {
+  const s = state.settings;
+  $("threshold").value = s.threshold; $("thresholdVal").textContent = s.threshold.toFixed(3);
+  $("softness").value = s.softness; $("softnessVal").textContent = s.softness.toFixed(3);
+  $("unblend").checked = s.unblend; $("protect").checked = s.protect_interior;
+  $("crf").value = state.crf; $("crfVal").textContent = state.crf;
+  $("crfBox").classList.toggle("hidden", state.format !== "webm");
+  selectIn("bgSeg", "bg", s.background); selectIn("presetSeg", "preset", state.preset);
+  selectIn("formatSeg", "format", state.format);
+  selectIn("viewSeg", "view", state.view); selectIn("backdropSeg", "backdrop", state.backdrop);
+  const canvas = $("canvas");
+  const showBackdrop = state.view === "result" || !$("playback").classList.contains("hidden");
+  canvas.classList.toggle("checker", showBackdrop && state.backdrop === "checker");
+  canvas.style.backgroundColor = showBackdrop && state.backdrop !== "checker" ? state.backdrop : "";
+  if (!showBackdrop) canvas.style.backgroundColor = "#0a0c10";
+}
+
+let previewTimer = null;
+function schedulePreview(delay = 60) {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(updatePreview, delay);
+}
+
+async function updatePreview() {
+  if (!state.clip) return;
+  const token = ++state.previewToken;
+  const t = (Number($("time").value) / 1000) * state.clip.duration;
+  $("timeLabel").textContent = `${fmtTime(t)} / ${fmtTime(state.clip.duration)}`;
+  const q = new URLSearchParams({ t: t.toFixed(3), view: state.view, ...Object.fromEntries(
+    Object.entries(state.settings).map(([k, v]) => [k, String(v)])) });
+  $("canvas").classList.add("loading");
+  try {
+    const response = await fetch(`/api/clips/${state.clip.id}/preview?${q}`);
+    if (!response.ok) throw new Error((await response.json()).error);
+    const blob = await response.blob();
+    if (token !== state.previewToken) return;
+    const img = $("preview");
+    const old = img.src; img.src = URL.createObjectURL(blob);
+    if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+    showPreviewImage();
+  } catch (e) {
+    if (token === state.previewToken) setStatus(e.message, "err");
+  } finally {
+    if (token === state.previewToken) $("canvas").classList.remove("loading");
+  }
+}
+
+function showPreviewImage() {
+  const video = $("playback");
+  if (!video.classList.contains("hidden")) { video.pause(); video.classList.add("hidden"); }
+  $("preview").classList.remove("hidden"); $("drop").classList.add("hidden");
+  syncControls();
+}
+
+function loadClip(clip) {
+  state.clip = clip;
+  $("clipname").textContent = clip.name;
+  $("clipInfo").innerHTML = `${clip.width}×${clip.height} · ${clip.frame_rate.toFixed(3).replace(/\.?0+$/, "")} fps · ` +
+    `${fmtTime(clip.duration)} · ${clip.frame_count} frames · ${clip.codec}`;
+  $("time").disabled = false; $("time").value = Math.min(250, $("time").value);
+  $("exportBtn").disabled = false;
+  $("result").classList.remove("show"); $("bar").style.width = "0";
+  setStatus("");
+  schedulePreview(0);
+}
+
+function upload(file) {
+  if (!file) return;
+  setStatus(`Opening ${file.name}…`);
+  const xhr = new XMLHttpRequest();
+  xhr.open("PUT", "/api/upload");
+  xhr.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+  xhr.upload.onprogress = (e) => { if (e.lengthComputable) {
+    $("bar").style.width = `${(e.loaded / e.total) * 100}%`;
+    setStatus(`Loading ${file.name}… ${Math.round(e.loaded / e.total * 100)}%`); } };
+  xhr.onload = () => {
+    let data = {}; try { data = JSON.parse(xhr.responseText); } catch {}
+    if (xhr.status === 200) loadClip(data);
+    else setStatus(data.error || "Could not open that file.", "err");
+  };
+  xhr.onerror = () => setStatus("Upload failed.", "err");
+  xhr.send(file);
+}
+
+async function startExport() {
+  if (!state.clip) return;
+  $("exportBtn").disabled = true; $("result").classList.remove("show");
+  $("cancelRun").classList.remove("hidden");
+  setStatus("Starting export…");
+  try {
+    const job = await api(`/api/clips/${state.clip.id}/export`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ format: state.format, settings: state.settings, crf: state.crf }),
+    });
+    state.job = job; pollJob();
+  } catch (e) { finishRun(); setStatus(e.message, "err"); }
+}
+
+async function pollJob() {
+  if (!state.job) return;
+  try {
+    const job = await api(`/api/jobs/${state.job.id}`);
+    state.job = job;
+    const pct = job.total ? Math.min(100, (job.done / job.total) * 100) : 0;
+    $("bar").style.width = `${pct}%`;
+    if (job.status === "running") {
+      const rate = job.elapsed > 0 ? job.done / job.elapsed : 0;
+      const eta = rate > 0 ? Math.max(0, (job.total - job.done) / rate) : null;
+      setStatus(`Exporting ${job.done}/${job.total} frames` + (eta !== null ? ` · ~${Math.ceil(eta)}s left` : ""));
+      setTimeout(pollJob, 400); return;
+    }
+    finishRun();
+    if (job.status === "done") {
+      setStatus(`Done in ${job.elapsed}s · ${job.filename} · ${fmtBytes(job.size)}`, "ok");
+      $("download").href = job.download; $("download").setAttribute("download", job.filename);
+      $("playBtn").classList.toggle("hidden", job.format !== "webm");
+      $("result").classList.add("show");
+    } else if (job.status === "cancelled") { setStatus("Export cancelled."); $("bar").style.width = "0"; }
+    else setStatus(job.error || "Export failed.", "err");
+  } catch (e) { finishRun(); setStatus(e.message, "err"); }
+}
+
+function finishRun() { $("exportBtn").disabled = !state.clip; $("cancelRun").classList.add("hidden"); }
+
+function playResult() {
+  if (!state.job || state.job.format !== "webm") return;
+  const video = $("playback");
+  video.src = `${state.job.stream}?v=${state.job.id}`;
+  $("preview").classList.add("hidden"); video.classList.remove("hidden");
+  state.view = "result"; syncControls(); video.play().catch(() => {});
+}
+
+// ---- wiring ---------------------------------------------------------------
+$("openBtn").onclick = () => $("file").click();
+$("file").onchange = (e) => upload(e.target.files[0]);
+const canvas = $("canvas");
+canvas.addEventListener("dragover", (e) => { e.preventDefault(); canvas.classList.add("dragging"); });
+canvas.addEventListener("dragleave", () => canvas.classList.remove("dragging"));
+canvas.addEventListener("drop", (e) => { e.preventDefault(); canvas.classList.remove("dragging"); upload(e.dataTransfer.files[0]); });
+
+$("viewSeg").onclick = (e) => { const v = e.target.closest("[data-view]"); if (!v) return;
+  state.view = v.dataset.view; syncControls(); schedulePreview(0); };
+$("backdropSeg").onclick = (e) => { const b = e.target.closest("[data-backdrop]"); if (!b) return;
+  state.backdrop = b.dataset.backdrop; syncControls(); };
+$("bgSeg").onclick = (e) => { const b = e.target.closest("[data-bg]"); if (!b) return;
+  state.settings.background = b.dataset.bg; syncControls(); schedulePreview(0); };
+$("presetSeg").onclick = (e) => { const p = e.target.closest("[data-preset]"); if (!p) return;
+  state.preset = p.dataset.preset;
+  const { background, ...values } = state.presets[state.preset];
+  Object.assign(state.settings, values); syncControls(); schedulePreview(0); };
+$("formatSeg").onclick = (e) => { const f = e.target.closest("[data-format]"); if (!f) return;
+  state.format = f.dataset.format; syncControls(); };
+for (const id of ["threshold", "softness"]) $(id).oninput = (e) => {
+  state.settings[id] = Number(e.target.value); syncControls(); schedulePreview(); };
+$("unblend").onchange = (e) => { state.settings.unblend = e.target.checked; schedulePreview(0); };
+$("protect").onchange = (e) => { state.settings.protect_interior = e.target.checked; schedulePreview(0); };
+$("crf").oninput = (e) => { state.crf = Number(e.target.value); syncControls(); };
+$("time").oninput = () => schedulePreview(30);
+$("exportBtn").onclick = startExport;
+$("cancelRun").onclick = () => state.job && api(`/api/jobs/${state.job.id}/cancel`, { method: "POST" });
+$("playBtn").onclick = playResult;
+
+(async () => {
+  const config = await api("/api/config");
+  $("version").textContent = `v${config.version}`;
+  state.presets = config.presets; state.crf = config.default_crf;
+  const { background, ...soft } = config.presets.soft; Object.assign(state.settings, soft);
+  syncControls();
+  if (config.clips.length) loadClip(config.clips[config.clips.length - 1]);
+})();
+</script>
+</body>
+</html>
