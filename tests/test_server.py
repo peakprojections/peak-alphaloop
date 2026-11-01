@@ -51,9 +51,17 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(image.size, (160, 96))
             self.assertEqual(image.mode, "RGBA" if view == "result" else "RGB")
 
+        _, _, body = self.request(f"/api/clips/{info['id']}/sample?t=0.1&x=0.02&y=0.05")
+        self.assertEqual(json.loads(body)["color"], "#000000")
+        _, _, body = self.request(f"/api/clips/{info['id']}/sample?t=0.1&x=0.40&y=0.50")
+        red, green, blue = (int(json.loads(body)["color"][i:i + 2], 16) for i in (1, 3, 5))
+        self.assertGreater(red, 200)
+        self.assertLess(blue, 60)
+
         _, _, body = self.request(
             f"/api/clips/{info['id']}/export",
-            json.dumps({"format": "prores", "settings": {"background": "black"}}).encode(),
+            json.dumps({"format": "prores", "mirror_loop": True,
+                        "settings": {"background": "black"}}).encode(),
             "POST", {"Content-Type": "application/json"})
         job = json.loads(body)
         deadline = time.monotonic() + 60
@@ -61,7 +69,9 @@ class ServerTests(unittest.TestCase):
             time.sleep(0.2)
             job = json.loads(self.request(f"/api/jobs/{job['id']}")[2])
         self.assertEqual(job["status"], "done", job.get("error"))
-        self.assertEqual(job["filename"], "my clip-alpha.mov")
+        self.assertEqual(job["filename"], "my clip-alpha-loop.mov")
+        self.assertEqual(job["total"], 22)
+        self.assertTrue(job["mirror_loop"])
         status, headers, data = self.request(job["download"])
         self.assertIn("attachment", headers["Content-Disposition"])
         self.assertEqual(len(data), job["size"])

@@ -29,9 +29,9 @@ import numpy as np
 from PIL import Image
 
 from . import __version__
-from .keying import PRESETS, KeySettings, alpha_matte, key_frame
+from .keying import COLOR_PRESETS, PRESETS, KeySettings, alpha_matte, key_frame
 from .media import (DEFAULT_WEBM_CRF, FORMATS, ExportCancelled, MediaError, VideoInfo,
-                    export, probe, read_frame)
+                    export, mirrored_frame_count, probe, read_frame)
 
 PREVIEW_MAX_WIDTH = 960
 UPLOAD_CHUNK = 1024 * 1024
@@ -53,6 +53,7 @@ class Job:
     export_format: str
     settings: KeySettings
     output: Path
+    mirror_loop: bool = False
     status: str = "running"  # running | done | error | cancelled
     done: int = 0
     total: int = 0
@@ -66,7 +67,7 @@ class Job:
         data: dict[str, Any] = {
             "id": self.id, "status": self.status, "done": self.done, "total": self.total,
             "error": self.error, "format": self.export_format, "elapsed": round(elapsed, 1),
-            "filename": self.output.name,
+            "filename": self.output.name, "mirror_loop": self.mirror_loop,
         }
         if self.status == "done" and self.output.is_file():
             data["size"] = self.output.stat().st_size
@@ -113,15 +114,17 @@ class Workspace:
                 self.frames.popitem(last=False)
         return frame
 
-    def start_job(self, clip: Clip, export_format: str, settings: KeySettings, crf: int) -> Job:
+    def start_job(self, clip: Clip, export_format: str, settings: KeySettings, crf: int,
+                  mirror_loop: bool = False) -> Job:
         if export_format not in FORMATS:
             raise ValueError("Unknown export format.")
         job_id = uuid.uuid4().hex
         stem = Path(clip.display_name).stem or "video"
         folder = self.root / "exports" / job_id
         folder.mkdir()
-        output = folder / f"{stem}-alpha{FORMATS[export_format]['suffix']}"
-        job = Job(job_id, clip, export_format, settings, output)
+        suffix = "-alpha-loop" if mirror_loop else "-alpha"
+        output = folder / f"{stem}{suffix}{FORMATS[export_format]['suffix']}"
+        job = Job(job_id, clip, export_format, settings, output, mirror_loop)
         with self.lock:
             self.jobs[job_id] = job
 
@@ -131,7 +134,8 @@ class Workspace:
         def run() -> None:
             try:
                 export(clip.path, output, settings, export_format,  # type: ignore[arg-type]
-                       webm_crf=crf, progress=progress, cancel=job.cancel)
+                       webm_crf=crf, progress=progress, cancel=job.cancel,
+                       mirror_loop=mirror_loop)
                 job.status = "done"
             except ExportCancelled:
                 job.status = "cancelled"
@@ -140,7 +144,8 @@ class Workspace:
             finally:
                 job.finished = time.monotonic()
 
-        job.total = clip.info.frame_count
+        job.total = (mirrored_frame_count(clip.info.frame_count) if mirror_loop
+                     else clip.info.frame_count)
         threading.Thread(target=run, name=f"export-{job_id[:8]}", daemon=True).start()
         return job
 
@@ -197,6 +202,7 @@ def make_handler(workspace: Workspace):
                     return self._json({
                         "version": __version__,
                         "presets": {name: s.to_dict() for name, s in PRESETS.items()},
+                        "color_presets": {name: s.to_dict() for name, s in COLOR_PRESETS.items()},
                         "formats": FORMATS, "default_crf": DEFAULT_WEBM_CRF,
                         "clips": [self._clip_dict(c) for c in workspace.clips.values()],
                     })
@@ -206,6 +212,8 @@ def make_handler(workspace: Workspace):
                     clip = workspace.clip(self._id(parts[2]))
                     if method == "GET" and parts[3:] == ["preview"]:
                         return self._preview(clip, query)
+                    if method == "GET" and parts[3:] == ["sample"]:
+                        return self._sample(clip, query)
                     if method == "POST" and parts[3:] == ["export"]:
                         return self._export(clip)
                 if len(parts) >= 3 and parts[:2] == ["api", "jobs"]:
@@ -261,13 +269,25 @@ def make_handler(workspace: Workspace):
             body = render_preview(workspace.frame(clip, seconds), settings, view)
             self._send(HTTPStatus.OK, body, "image/png", {"Cache-Control": "no-store"})
 
+        def _sample(self, clip: Clip, query: dict[str, str]) -> None:
+            """Median color around a point; x and y are 0-1 fractions of the frame."""
+            frame = workspace.frame(clip, float(query.get("t", "0")))
+            height, width = frame.shape[:2]
+            x = min(width - 1, max(0, int(float(query["x"]) * width)))
+            y = min(height - 1, max(0, int(float(query["y"]) * height)))
+            radius = max(1, int(query.get("radius", "3")))
+            patch = frame[max(0, y - radius):y + radius + 1, max(0, x - radius):x + radius + 1]
+            red, green, blue = (int(v) for v in np.median(patch.reshape(-1, 3), axis=0))
+            self._json({"color": f"#{red:02x}{green:02x}{blue:02x}"})
+
         def _export(self, clip: Clip) -> None:
             payload = self._read_json()
             settings = KeySettings.from_dict(payload.get("settings", {}))
             crf = int(payload.get("crf", DEFAULT_WEBM_CRF))
             if not 4 <= crf <= 63:
                 raise ValueError("WebM quality must be between 4 and 63.")
-            job = workspace.start_job(clip, str(payload.get("format", "webm")), settings, crf)
+            job = workspace.start_job(clip, str(payload.get("format", "webm")), settings, crf,
+                                      bool(payload.get("mirror_loop", False)))
             self._json(job.to_dict())
 
         def _send_file(self, job: Job, attachment: bool) -> None:

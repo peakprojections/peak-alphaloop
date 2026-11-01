@@ -92,6 +92,20 @@
   .result { display: none; margin-top: 10px; gap: 8px; flex-direction: column; }
   .result.show { display: flex; }
   .hidden { display: none !important; }
+  .row.three > * { min-width: 0; }
+  .keycolor { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .keycolor .pickrow { display: flex; gap: 8px; align-items: center; }
+  .keycolor input[type=color] { width: 44px; height: 36px; padding: 0; border: 1px solid var(--line);
+    border-radius: 8px; background: var(--panel-2); cursor: pointer; }
+  .keycolor input[type=text] { width: 92px; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px; font-family: ui-monospace, monospace; }
+  .keycolor .btn { flex: 1; padding: 8px 10px; }
+  .btn.active { border-color: var(--accent); background: #1d3550; }
+  .canvas.picking, .canvas.picking img { cursor: crosshair; }
+  .pickhint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); font-size: 12px;
+    background: rgba(0,0,0,.6); padding: 4px 10px; border-radius: 6px; display: none; }
+  .canvas.picking .pickhint { display: block; }
+  #pickSwatch { background: #00b140; }
 </style>
 </head>
 <body>
@@ -126,6 +140,7 @@
       <img id="preview" alt="" class="hidden">
       <video id="playback" class="hidden" controls loop muted playsinline></video>
       <div class="busy">Updating…</div>
+      <div class="pickhint">Click the background to sample its color · Esc to cancel</div>
     </div>
 
     <div class="timeline">
@@ -144,9 +159,21 @@
 
     <section>
       <h2>Background to remove</h2>
-      <div class="row" id="bgSeg">
+      <div class="row three" id="bgSeg">
         <button class="choice on" data-bg="black"><b><i class="swatch" style="background:#000"></i>Black</b></button>
         <button class="choice" data-bg="white"><b><i class="swatch" style="background:#fff"></i>White</b></button>
+        <button class="choice" data-bg="color"><b><i class="swatch" id="pickSwatch"></i>Color</b></button>
+      </div>
+      <div class="keycolor hidden" id="keyColorBox">
+        <div class="pickrow">
+          <input type="color" id="keyColor" value="#00b140" title="Choose the background color">
+          <input type="text" id="keyHex" value="#00b140" spellcheck="false" maxlength="7" aria-label="Hex color">
+          <button class="btn" id="pickBtn" title="Click the background in the preview to sample it">Pick from video</button>
+        </div>
+        <div class="info" style="margin-top:0">Click <em>Pick from video</em>, then click the background in the preview.
+          Pick a typical spot, not the brightest or darkest part.</div>
+        <label class="check" style="margin:0"><input type="checkbox" id="despill">
+          <div>Remove color cast<span>Pulls green/blue spill out of hair and skin edges.</span></div></label>
       </div>
     </section>
 
@@ -187,6 +214,8 @@
         <input type="range" id="crf" min="15" max="45" step="1">
         <div class="hint">Lower = better quality and larger file. 30 is a good default.</div>
       </div>
+      <label class="check" style="margin-top:4px"><input type="checkbox" id="mirrorLoop">
+        <div>Mirror loop<span id="loopHint">Plays forward, then in reverse, so the end flows back into the start. About double the length.</span></div></label>
       <button class="btn primary wide" id="exportBtn" disabled style="margin-top:4px">Export video</button>
       <div class="progress"><div id="bar"></div></div>
       <div class="status" id="status"></div>
@@ -204,8 +233,9 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   clip: null, view: "result", backdrop: "checker", preset: "soft", format: "webm",
-  settings: { background: "black", threshold: 0.03, softness: 0.97, unblend: true, protect_interior: false },
-  presets: {}, crf: 30, job: null, previewToken: 0,
+  settings: { background: "black", threshold: 0.03, softness: 0.97, unblend: true, protect_interior: false,
+              key_color: "#00b140", despill: true },
+  presets: {}, colorPresets: {}, crf: 30, job: null, previewToken: 0, picking: false, mirrorLoop: false,
 };
 
 async function api(path, options = {}) {
@@ -235,6 +265,19 @@ function syncControls() {
   $("threshold").value = s.threshold; $("thresholdVal").textContent = s.threshold.toFixed(3);
   $("softness").value = s.softness; $("softnessVal").textContent = s.softness.toFixed(3);
   $("unblend").checked = s.unblend; $("protect").checked = s.protect_interior;
+  $("despill").checked = s.despill; $("mirrorLoop").checked = state.mirrorLoop;
+  $("keyColorBox").classList.toggle("hidden", s.background !== "color");
+  $("keyColor").value = s.key_color; $("pickSwatch").style.background = s.key_color;
+  if (document.activeElement !== $("keyHex")) $("keyHex").value = s.key_color;
+  $("pickBtn").classList.toggle("active", state.picking);
+  $("pickBtn").textContent = state.picking ? "Click the video…" : "Pick from video";
+  $("canvas").classList.toggle("picking", state.picking);
+  if (state.clip) {
+    const n = state.clip.frame_count, frames = state.mirrorLoop ? n + Math.max(0, n - 2) : n;
+    $("loopHint").textContent = state.mirrorLoop
+      ? `Forward then reverse: ${fmtTime(frames / state.clip.frame_rate)} (${frames} frames) from ${fmtTime(state.clip.duration)}.`
+      : "Plays forward, then in reverse, so the end flows back into the start. About double the length.";
+  }
   $("crf").value = state.crf; $("crfVal").textContent = state.crf;
   $("crfBox").classList.toggle("hidden", state.format !== "webm");
   selectIn("bgSeg", "bg", s.background); selectIn("presetSeg", "preset", state.preset);
@@ -322,7 +365,8 @@ async function startExport() {
   try {
     const job = await api(`/api/clips/${state.clip.id}/export`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ format: state.format, settings: state.settings, crf: state.crf }),
+      body: JSON.stringify({ format: state.format, settings: state.settings, crf: state.crf,
+                             mirror_loop: state.mirrorLoop }),
     });
     state.job = job; pollJob();
   } catch (e) { finishRun(); setStatus(e.message, "err"); }
@@ -374,12 +418,51 @@ $("viewSeg").onclick = (e) => { const v = e.target.closest("[data-view]"); if (!
   state.view = v.dataset.view; syncControls(); schedulePreview(0); };
 $("backdropSeg").onclick = (e) => { const b = e.target.closest("[data-backdrop]"); if (!b) return;
   state.backdrop = b.dataset.backdrop; syncControls(); };
+function applyPreset() {
+  const table = state.settings.background === "color" ? state.colorPresets : state.presets;
+  const { background, key_color, ...values } = table[state.preset];
+  Object.assign(state.settings, values);
+}
 $("bgSeg").onclick = (e) => { const b = e.target.closest("[data-bg]"); if (!b) return;
-  state.settings.background = b.dataset.bg; syncControls(); schedulePreview(0); };
+  const wasColor = state.settings.background === "color";
+  state.settings.background = b.dataset.bg;
+  // Color keys use a different distance scale, so switch to matching starting values.
+  if (wasColor !== (b.dataset.bg === "color")) applyPreset();
+  if (b.dataset.bg === "color" && !state.pickedOnce && state.clip) state.picking = true;
+  if (b.dataset.bg !== "color") state.picking = false;
+  syncControls(); schedulePreview(0); };
 $("presetSeg").onclick = (e) => { const p = e.target.closest("[data-preset]"); if (!p) return;
-  state.preset = p.dataset.preset;
-  const { background, ...values } = state.presets[state.preset];
-  Object.assign(state.settings, values); syncControls(); schedulePreview(0); };
+  state.preset = p.dataset.preset; applyPreset(); syncControls(); schedulePreview(0); };
+
+function setKeyColor(hex) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return false;
+  state.settings.key_color = hex.toLowerCase(); syncControls(); schedulePreview(0); return true;
+}
+$("keyColor").oninput = (e) => { state.pickedOnce = true; setKeyColor(e.target.value); };
+$("keyHex").oninput = (e) => {
+  const v = e.target.value.trim(); const hex = v.startsWith("#") ? v : "#" + v;
+  if (setKeyColor(hex)) state.pickedOnce = true;
+};
+$("keyHex").onblur = () => syncControls();
+$("pickBtn").onclick = () => { if (!state.clip) return; state.picking = !state.picking; syncControls(); };
+$("despill").onchange = (e) => { state.settings.despill = e.target.checked; schedulePreview(0); };
+$("mirrorLoop").onchange = (e) => { state.mirrorLoop = e.target.checked; syncControls(); };
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && state.picking) { state.picking = false; syncControls(); }
+});
+$("preview").addEventListener("click", async (e) => {
+  if (!state.picking || !state.clip) return;
+  const rect = e.target.getBoundingClientRect();
+  const x = (e.clientX - rect.left) / rect.width, y = (e.clientY - rect.top) / rect.height;
+  const t = (Number($("time").value) / 1000) * state.clip.duration;
+  try {
+    const { color } = await api(`/api/clips/${state.clip.id}/sample?` +
+      new URLSearchParams({ t: t.toFixed(3), x: x.toFixed(4), y: y.toFixed(4) }));
+    state.picking = false; state.pickedOnce = true;
+    state.settings.background = "color";
+    setKeyColor(color); setStatus(`Background color set to ${color}.`);
+  } catch (err) { setStatus(err.message, "err"); }
+});
 $("formatSeg").onclick = (e) => { const f = e.target.closest("[data-format]"); if (!f) return;
   state.format = f.dataset.format; syncControls(); };
 for (const id of ["threshold", "softness"]) $(id).oninput = (e) => {
@@ -395,8 +478,8 @@ $("playBtn").onclick = playResult;
 (async () => {
   const config = await api("/api/config");
   $("version").textContent = `v${config.version}`;
-  state.presets = config.presets; state.crf = config.default_crf;
-  const { background, ...soft } = config.presets.soft; Object.assign(state.settings, soft);
+  state.presets = config.presets; state.colorPresets = config.color_presets; state.crf = config.default_crf;
+  const { background, key_color, ...soft } = config.presets.soft; Object.assign(state.settings, soft);
   syncControls();
   if (config.clips.length) loadClip(config.clips[config.clips.length - 1]);
 })();

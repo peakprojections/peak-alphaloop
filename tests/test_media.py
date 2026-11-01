@@ -9,7 +9,7 @@ import numpy as np
 
 from peak_video_editor.keying import preset
 from peak_video_editor.media import (ExportCancelled, MediaError, default_output_path, export,
-                                     probe, read_alpha_range, read_frame)
+                                     mirrored_frame_count, probe, read_alpha_range, read_frame)
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
@@ -31,6 +31,15 @@ def make_clip(path: Path, background: int = 0, frames: int = 12, size=(160, 96))
     if process.wait() != 0:
         raise RuntimeError("could not build test clip")
     return path
+
+
+def decode_all_rgba(path: Path) -> np.ndarray:
+    info = probe(path)
+    decoder = ["-c:v", "libvpx-vp9"] if path.suffix == ".webm" else []
+    completed = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", *decoder, "-i", str(path),
+         "-f", "rawvideo", "-pix_fmt", "rgba", "-"], capture_output=True, check=True)
+    return np.frombuffer(completed.stdout, np.uint8).reshape(-1, info.height, info.width, 4)
 
 
 def decode_rgba(path: Path, index: int = 0) -> np.ndarray:
@@ -86,6 +95,42 @@ class ExportTests(unittest.TestCase):
              "-vf", "format=rgba,alphaextract", "-f", "rawvideo", "-"],
             capture_output=True, check=True)
         self.assertEqual(min(completed.stdout), 255)
+
+    def test_mirror_loop_plays_forward_then_backward(self) -> None:
+        self.assertEqual(mirrored_frame_count(12), 22)
+        self.assertEqual(mirrored_frame_count(1), 1)
+        clip = make_clip(self.folder / "clip.mp4", frames=12)
+        output = self.folder / "loop.mov"
+        calls = []
+        export(clip, output, preset("hard"), "prores", mirror_loop=True,
+               progress=lambda done, total: calls.append((done, total)))
+        frames = decode_all_rgba(output).astype(int)
+        self.assertEqual(len(frames), 22)
+        self.assertEqual(calls[0][1], 22)
+        self.assertEqual(calls[-1], (22, 22))
+        # Frame k mirrors frame 2N-2-k; turnaround frames 0 and N-1 appear once.
+        for k in range(1, 11):
+            self.assertLess(np.abs(frames[k] - frames[22 - k]).mean(), 1.0, k)
+        self.assertGreater(np.abs(frames[11] - frames[10]).mean(), 1.0)
+        self.assertLess(np.abs(frames[12] - frames[10]).mean(), 1.0)
+        self.assertGreater(np.abs(frames[0] - frames[1]).mean(), 1.0)
+        self.assertLess(np.abs(frames[21] - frames[1]).mean(), 1.0)
+
+    def test_color_key_export(self) -> None:
+        clip = make_clip(self.folder / "green.mp4", background=0)
+        # Rebuild the clip on a green screen.
+        green = self.folder / "screen.mp4"
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(clip),
+                        "-vf", "colorchannelmixer=rr=1:gg=1:bb=1,"
+                        "geq=r='if(lt(r(X,Y),5),30,r(X,Y))':g='if(lt(r(X,Y),5),160,g(X,Y))':"
+                        "b='if(lt(r(X,Y),5),60,b(X,Y))'",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "12", str(green)],
+                       check=True)
+        output = self.folder / "green-alpha.webm"
+        export(green, output, preset("hard", "color", "#1ea03c"), "webm")
+        rgba = decode_rgba(output)
+        self.assertLess(rgba[5, 5, 3], 8)
+        self.assertGreater(rgba[48, 70, 3], 245)
 
     def test_cancel_removes_partial_output(self) -> None:
         clip = make_clip(self.folder / "clip.mp4", frames=24)

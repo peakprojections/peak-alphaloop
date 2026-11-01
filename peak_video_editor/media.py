@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
+import zlib
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -28,6 +30,8 @@ FORMATS: dict[str, dict[str, str]] = {
 
 # Lower is better quality for VP9 CRF. 30 is visually clean for most overlays.
 DEFAULT_WEBM_CRF = 30
+# Fast zlib level for the mirror-loop spool; keyed frames compress well anyway.
+SPOOL_COMPRESSION = 1
 
 
 class MediaError(RuntimeError):
@@ -171,8 +175,15 @@ ProgressCallback = Callable[[int, int], None]
 def export(source: Path | str, destination: Path | str, settings: KeySettings,
            export_format: ExportFormat, *, webm_crf: int = DEFAULT_WEBM_CRF,
            progress: ProgressCallback | None = None,
-           cancel: threading.Event | None = None) -> Path:
-    """Key every frame of ``source`` and write it with alpha to ``destination``."""
+           cancel: threading.Event | None = None,
+           mirror_loop: bool = False) -> Path:
+    """Key every frame of ``source`` and write it with alpha to ``destination``.
+
+    With ``mirror_loop`` the clip plays forward and then backward
+    (frames 0..N-1 followed by N-2..1), so the last frame flows straight back
+    into the first and the result loops seamlessly. The turnaround frames are
+    not repeated, which would show up as a brief hold.
+    """
     info = probe(source)
     destination = Path(destination)
     expected_suffix = FORMATS[export_format]["suffix"]
@@ -187,17 +198,31 @@ def export(source: Path | str, destination: Path | str, settings: KeySettings,
                "-framerate", str(info.frame_rate), "-i", "-",
                "-an", *encoder_arguments(export_format, webm_crf), str(partial)]
     written = 0
-    with tempfile.TemporaryFile() as log:
+    expected = mirrored_frame_count(info.frame_count) if mirror_loop else info.frame_count
+    with tempfile.TemporaryFile() as log, contextlib.ExitStack() as stack:
+        spool = stack.enter_context(FrameSpool()) if mirror_loop else None
         encoder = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=log)
         try:
             assert encoder.stdin is not None
-            for keyed in _keyed_frames(info, settings):
+
+            def emit(frame_bytes: bytes) -> None:
+                nonlocal written, expected
                 if cancel is not None and cancel.is_set():
                     raise ExportCancelled("Export cancelled.")
-                encoder.stdin.write(keyed.tobytes())
+                encoder.stdin.write(frame_bytes)  # type: ignore[union-attr]
                 written += 1
                 if progress is not None:
-                    progress(written, max(written, info.frame_count))
+                    progress(written, max(written, expected))
+
+            for keyed, packed in _keyed_frames(info, settings, compress=mirror_loop):
+                emit(keyed.tobytes())
+                if spool is not None and packed is not None:
+                    spool.append(packed)
+            if spool is not None:
+                # Forward pass told us the real frame count; correct the estimate.
+                expected = mirrored_frame_count(len(spool))
+                for index in range(len(spool) - 2, 0, -1):
+                    emit(spool.read(index))
             encoder.stdin.close()
             returncode = encoder.wait()
         except BrokenPipeError:
@@ -205,6 +230,8 @@ def export(source: Path | str, destination: Path | str, settings: KeySettings,
         except BaseException:
             encoder.kill()
             encoder.wait()
+            with contextlib.suppress(OSError):
+                encoder.stdin.close()  # type: ignore[union-attr]
             partial.unlink(missing_ok=True)
             raise
         if returncode != 0 or written == 0:
@@ -218,19 +245,31 @@ def export(source: Path | str, destination: Path | str, settings: KeySettings,
     return destination
 
 
-def _keyed_frames(info: VideoInfo, settings: KeySettings) -> Iterator[np.ndarray]:
-    """Key frames on a small thread pool while preserving frame order."""
+def _keyed_frames(info: VideoInfo, settings: KeySettings,
+                  compress: bool = False) -> Iterator[tuple[np.ndarray, bytes | None]]:
+    """Key frames on a small thread pool while preserving frame order.
+
+    With ``compress`` each keyed frame is also zlib-packed on the worker thread
+    (zlib releases the GIL) for the mirror-loop spool.
+    """
+    def work(frame: np.ndarray) -> tuple[np.ndarray, bytes | None]:
+        keyed = key_frame(frame, settings)
+        return keyed, (zlib.compress(keyed.tobytes(), SPOOL_COMPRESSION) if compress else None)
+
     workers = max(1, min(6, (os.cpu_count() or 2) - 1))
-    if workers == 1:
-        for frame in iter_frames(info):
-            yield key_frame(frame, settings)
-        return
-    pending: deque[Future[np.ndarray]] = deque()
     frames = iter_frames(info)
+    if workers == 1:
+        try:
+            for frame in frames:
+                yield work(frame)
+        finally:
+            frames.close()
+        return
+    pending: deque[Future[tuple[np.ndarray, bytes | None]]] = deque()
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="key") as pool:
         try:
             for frame in frames:
-                pending.append(pool.submit(key_frame, frame, settings))
+                pending.append(pool.submit(work, frame))
                 if len(pending) >= workers * 2:
                     yield pending.popleft().result()
             while pending:
@@ -239,6 +278,41 @@ def _keyed_frames(info: VideoInfo, settings: KeySettings) -> Iterator[np.ndarray
             for future in pending:
                 future.cancel()
             frames.close()
+
+
+def mirrored_frame_count(frame_count: int) -> int:
+    """Frames in a forward-then-backward loop without repeated turnaround frames."""
+    return frame_count + max(0, frame_count - 2)
+
+
+class FrameSpool:
+    """Compressed keyed frames on disk, so long clips can be replayed in reverse
+    without holding them all in memory."""
+
+    def __init__(self) -> None:
+        self._file = tempfile.TemporaryFile(prefix="peak-loop-")
+        self._index: list[tuple[int, int]] = []
+        self._end = 0
+
+    def __enter__(self) -> "FrameSpool":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._file.close()
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+    def append(self, packed: bytes) -> None:
+        self._file.seek(self._end)
+        self._file.write(packed)
+        self._index.append((self._end, len(packed)))
+        self._end += len(packed)
+
+    def read(self, index: int) -> bytes:
+        offset, length = self._index[index]
+        self._file.seek(offset)
+        return zlib.decompress(self._file.read(length))
 
 
 def read_alpha_range(path: Path | str) -> tuple[int, int]:

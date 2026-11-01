@@ -15,14 +15,16 @@ from .media import FORMATS, MediaError, default_output_path, export, probe, read
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="peak-key",
-        description="Turn a black or white video background into a transparent alpha channel "
+        description="Turn a black, white or colored (green screen) video background into a transparent alpha channel "
                     "and save it as WebM (VP9) or ProRes 4444.",
     )
     parser.add_argument("input", type=Path, nargs="+", help="Source video file(s).")
     parser.add_argument("-o", "--output", type=Path,
                         help="Output file (single input) or folder (several inputs). "
                              "Defaults to <name>-alpha.webm/.mov next to the source.")
-    parser.add_argument("-b", "--background", choices=["black", "white"], default="black")
+    parser.add_argument("-b", "--background", default="black", metavar="black|white|#RRGGBB",
+                        help="Background to remove: black, white, or a hex color such as "
+                             "#00b140 for a green screen (default black).")
     parser.add_argument("-p", "--preset", choices=sorted(PRESETS), default="soft",
                         help="soft = glows/smoke/light (luma key); hard = solid objects.")
     parser.add_argument("-f", "--format", choices=sorted(FORMATS), default="webm",
@@ -34,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Only key background regions touching the frame edge.")
     parser.add_argument("--unblend", action=argparse.BooleanOptionalAction, default=None,
                         help="Recover edge colors to remove dark/light fringes (default on).")
+    parser.add_argument("--despill", action=argparse.BooleanOptionalAction, default=None,
+                        help="Color keys only: remove the key color's cast from the subject (default on).")
+    parser.add_argument("-m", "--mirror-loop", action="store_true",
+                        help="Play forward then backward so the export loops seamlessly "
+                             "(about double the length).")
     parser.add_argument("--crf", type=int, default=30, help="WebM quality, 15 (best) to 50. Default 30.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -41,8 +48,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    settings = preset(args.preset, args.background)
-    overrides = {key: getattr(args, key) for key in ("threshold", "softness", "protect_interior", "unblend")
+    background = args.background.strip().lower()
+    try:
+        if background in ("black", "white"):
+            settings = preset(args.preset, background)  # type: ignore[arg-type]
+        else:
+            settings = preset(args.preset, "color", background)
+    except ValueError:
+        print("peak-key: --background must be black, white or a #RRGGBB color.", file=sys.stderr)
+        return 2
+    overrides = {key: getattr(args, key) for key in
+                 ("threshold", "softness", "protect_interior", "unblend", "despill")
                  if getattr(args, key) is not None}
     settings = replace(settings, **overrides).validated()
 
@@ -58,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{source.name}: {info.width}x{info.height} @ {float(info.frame_rate):.3g} fps, "
                   f"{info.frame_count} frames -> {destination}")
             export(source, destination, settings, args.format, webm_crf=args.crf,
-                   progress=_progress_printer())
+                   progress=_progress_printer(), mirror_loop=args.mirror_loop)
             low, high = read_alpha_range(destination)
             print(f"\n  done. alpha range in first frame: {low}-{high}")
         except MediaError as error:
