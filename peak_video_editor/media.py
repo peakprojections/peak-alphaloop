@@ -21,12 +21,19 @@ import numpy as np
 
 from .keying import KeySettings, key_frame
 
-ExportFormat = Literal["webm", "prores"]
+ExportFormat = Literal["webm", "prores", "mp4"]
 
-FORMATS: dict[str, dict[str, str]] = {
-    "webm": {"suffix": ".webm", "label": "WebM (VP9 + alpha)"},
-    "prores": {"suffix": ".mov", "label": "ProRes 4444 (.mov)"},
+# "alpha" says whether the format can carry transparency. MP4 (H.264) is only
+# offered when background removal is off.
+FORMATS: dict[str, dict[str, object]] = {
+    "webm": {"suffix": ".webm", "label": "WebM (VP9 + alpha)", "plain_label": "WebM (VP9)",
+             "alpha": True},
+    "prores": {"suffix": ".mov", "label": "ProRes 4444 (.mov)", "plain_label": "ProRes 422 HQ (.mov)",
+               "alpha": True},
+    "mp4": {"suffix": ".mp4", "label": "MP4 (H.264)", "plain_label": "MP4 (H.264)", "alpha": False},
 }
+# Quality for H.264 output; 18 is visually lossless for most footage.
+DEFAULT_MP4_CRF = 18
 
 # Lower is better quality for VP9 CRF. 30 is visually clean for most overlays.
 DEFAULT_WEBM_CRF = 30
@@ -149,8 +156,11 @@ def iter_frames(info: VideoInfo) -> Iterator[np.ndarray]:
             raise MediaError(f"Decoding {info.path.name} failed: {details}")
 
 
-def encoder_arguments(export_format: ExportFormat, webm_crf: int = DEFAULT_WEBM_CRF) -> list[str]:
+def encoder_arguments(export_format: ExportFormat, webm_crf: int = DEFAULT_WEBM_CRF,
+                      alpha: bool = True) -> list[str]:
     color_tags = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+    if not alpha:
+        return _plain_encoder_arguments(export_format, webm_crf, color_tags)
     if export_format == "webm":
         return ["-vf", "scale=out_color_matrix=bt709:out_range=tv,format=yuva420p",
                 "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
@@ -161,12 +171,43 @@ def encoder_arguments(export_format: ExportFormat, webm_crf: int = DEFAULT_WEBM_
         return ["-vf", "scale=out_color_matrix=bt709:out_range=tv,format=yuva444p10le",
                 "-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le",
                 "-alpha_bits", "16", "-vendor", "apl0", *color_tags]
-    raise MediaError(f"Unknown export format {export_format!r}; use 'webm' or 'prores'.")
+    if export_format == "mp4":
+        raise MediaError("MP4 (H.264) cannot hold transparency; turn background removal off "
+                         "or choose WebM or ProRes.")
+    raise MediaError(f"Unknown export format {export_format!r}; use 'webm', 'prores' or 'mp4'.")
 
 
-def default_output_path(source: Path | str, export_format: ExportFormat) -> Path:
+def _plain_encoder_arguments(export_format: str, webm_crf: int, color_tags: list[str]) -> list[str]:
+    """Opaque output for pass-through exports (no background removal)."""
+    # 4:2:0 formats need even dimensions; pad by one pixel if the source is odd.
+    even = "pad=ceil(iw/2)*2:ceil(ih/2)*2"
+    if export_format == "webm":
+        return ["-vf", f"{even},scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
+                "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p",
+                "-crf", str(int(webm_crf)), "-b:v", "0",
+                "-row-mt", "1", "-deadline", "good", "-cpu-used", "4", *color_tags]
+    if export_format == "prores":
+        return ["-vf", "scale=out_color_matrix=bt709:out_range=tv,format=yuv422p10le",
+                "-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le",
+                "-vendor", "apl0", *color_tags]
+    if export_format == "mp4":
+        return ["-vf", f"{even},scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
+                "-c:v", "libx264", "-preset", "medium", "-crf", str(DEFAULT_MP4_CRF),
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", *color_tags]
+    raise MediaError(f"Unknown export format {export_format!r}; use 'webm', 'prores' or 'mp4'.")
+
+
+def output_suffix(remove_background: bool = True, mirror_loop: bool = False) -> str:
+    """File-name tag: name-alpha.webm, name-alpha-loop.webm, name-loop.mp4, ..."""
+    parts = (["alpha"] if remove_background else []) + (["loop"] if mirror_loop else [])
+    return "-" + "-".join(parts or ["export"])
+
+
+def default_output_path(source: Path | str, export_format: ExportFormat,
+                        remove_background: bool = True, mirror_loop: bool = False) -> Path:
     source = Path(source)
-    return source.with_name(f"{source.stem}-alpha{FORMATS[export_format]['suffix']}")
+    tag = output_suffix(remove_background, mirror_loop)
+    return source.with_name(f"{source.stem}{tag}{FORMATS[export_format]['suffix']}")
 
 
 ProgressCallback = Callable[[int, int], None]
@@ -176,27 +217,38 @@ def export(source: Path | str, destination: Path | str, settings: KeySettings,
            export_format: ExportFormat, *, webm_crf: int = DEFAULT_WEBM_CRF,
            progress: ProgressCallback | None = None,
            cancel: threading.Event | None = None,
-           mirror_loop: bool = False) -> Path:
+           mirror_loop: bool = False,
+           remove_background: bool = True) -> Path:
     """Key every frame of ``source`` and write it with alpha to ``destination``.
+
+    With ``remove_background=False`` frames pass through untouched and the
+    output is a normal opaque video (useful for just making a mirror loop).
 
     With ``mirror_loop`` the clip plays forward and then backward
     (frames 0..N-1 followed by N-2..1), so the last frame flows straight back
     into the first and the result loops seamlessly. The turnaround frames are
     not repeated, which would show up as a brief hold.
     """
+    if export_format not in FORMATS:
+        raise MediaError(f"Unknown export format {export_format!r}; use 'webm', 'prores' or 'mp4'.")
+    if remove_background and not FORMATS[export_format]["alpha"]:
+        encoder_arguments(export_format, webm_crf, alpha=True)  # raises a clear error
     info = probe(source)
     destination = Path(destination)
-    expected_suffix = FORMATS[export_format]["suffix"]
+    expected_suffix = str(FORMATS[export_format]["suffix"])
     if destination.suffix.lower() != expected_suffix:
-        raise MediaError(f"{FORMATS[export_format]['label']} output must end in {expected_suffix}.")
+        label = FORMATS[export_format]["label" if remove_background else "plain_label"]
+        raise MediaError(f"{label} output must end in {expected_suffix}.")
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_name(f".{destination.stem}.partial{expected_suffix}")
     settings = settings.validated()
 
     command = [find_binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
-               "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{info.width}x{info.height}",
+               "-f", "rawvideo", "-pix_fmt", "rgba" if remove_background else "rgb24",
+               "-s", f"{info.width}x{info.height}",
                "-framerate", str(info.frame_rate), "-i", "-",
-               "-an", *encoder_arguments(export_format, webm_crf), str(partial)]
+               "-an", *encoder_arguments(export_format, webm_crf, alpha=remove_background),
+               str(partial)]
     written = 0
     expected = mirrored_frame_count(info.frame_count) if mirror_loop else info.frame_count
     with tempfile.TemporaryFile() as log, contextlib.ExitStack() as stack:
@@ -214,7 +266,8 @@ def export(source: Path | str, destination: Path | str, settings: KeySettings,
                 if progress is not None:
                     progress(written, max(written, expected))
 
-            for keyed, packed in _keyed_frames(info, settings, compress=mirror_loop):
+            for keyed, packed in _keyed_frames(info, settings, compress=mirror_loop,
+                                               key=remove_background):
                 emit(keyed.tobytes())
                 if spool is not None and packed is not None:
                     spool.append(packed)
@@ -245,15 +298,16 @@ def export(source: Path | str, destination: Path | str, settings: KeySettings,
     return destination
 
 
-def _keyed_frames(info: VideoInfo, settings: KeySettings,
-                  compress: bool = False) -> Iterator[tuple[np.ndarray, bytes | None]]:
+def _keyed_frames(info: VideoInfo, settings: KeySettings, compress: bool = False,
+                  key: bool = True) -> Iterator[tuple[np.ndarray, bytes | None]]:
     """Key frames on a small thread pool while preserving frame order.
 
     With ``compress`` each keyed frame is also zlib-packed on the worker thread
-    (zlib releases the GIL) for the mirror-loop spool.
+    (zlib releases the GIL) for the mirror-loop spool. With ``key=False`` frames
+    pass through unchanged.
     """
     def work(frame: np.ndarray) -> tuple[np.ndarray, bytes | None]:
-        keyed = key_frame(frame, settings)
+        keyed = key_frame(frame, settings) if key else frame
         return keyed, (zlib.compress(keyed.tobytes(), SPOOL_COMPRESSION) if compress else None)
 
     workers = max(1, min(6, (os.cpu_count() or 2) - 1))

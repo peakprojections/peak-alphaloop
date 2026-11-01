@@ -76,6 +76,30 @@ class ServerTests(unittest.TestCase):
         self.assertIn("attachment", headers["Content-Disposition"])
         self.assertEqual(len(data), job["size"])
 
+    def test_export_without_background_removal(self) -> None:
+        clip = make_clip(self.folder / "plain.mp4")
+        info = json.loads(self.request("/api/upload", clip.read_bytes(), "PUT",
+                                       {"X-Filename": "plain.mp4"})[2])
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.request(f"/api/clips/{info['id']}/export",
+                         json.dumps({"format": "mp4"}).encode(), "POST",
+                         {"Content-Type": "application/json"})
+        self.assertEqual(caught.exception.code, 400)
+        job = json.loads(self.request(
+            f"/api/clips/{info['id']}/export",
+            json.dumps({"format": "mp4", "remove_background": False, "mirror_loop": True}).encode(),
+            "POST", {"Content-Type": "application/json"})[2])
+        deadline = time.monotonic() + 60
+        while job["status"] == "running" and time.monotonic() < deadline:
+            time.sleep(0.2)
+            job = json.loads(self.request(f"/api/jobs/{job['id']}")[2])
+        self.assertEqual(job["status"], "done", job.get("error"))
+        self.assertEqual(job["filename"], "plain-loop.mp4")
+        self.assertFalse(job["remove_background"])
+        status, headers, _ = self.request(job["stream"], headers={"Range": "bytes=0-99"})
+        self.assertEqual(status, 206)
+        self.assertEqual(headers["Content-Type"], "video/mp4")
+
     def test_unknown_ids_and_bad_upload(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.request("/api/clips/" + "0" * 32 + "/preview")

@@ -132,6 +132,35 @@ class ExportTests(unittest.TestCase):
         self.assertLess(rgba[5, 5, 3], 8)
         self.assertGreater(rgba[48, 70, 3], 245)
 
+    def test_pass_through_export_keeps_background(self) -> None:
+        clip = make_clip(self.folder / "clip.mp4", frames=12)
+        for export_format, codec in (("mp4", "h264"), ("webm", "vp9"), ("prores", "prores")):
+            with self.subTest(format=export_format):
+                output = default_output_path(clip, export_format, remove_background=False,
+                                             mirror_loop=True)
+                self.assertTrue(output.stem.endswith("-loop"))
+                self.assertNotIn("alpha", output.stem)
+                export(clip, output, preset("hard"), export_format, mirror_loop=True,
+                       remove_background=False)
+                probe_out = subprocess.run(
+                    ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                     "stream=codec_name,pix_fmt", "-of", "csv=p=0", str(output)],
+                    capture_output=True, text=True, check=True).stdout.strip()
+                self.assertTrue(probe_out.startswith(codec), probe_out)
+                self.assertNotIn("yuva", probe_out)
+                frames = decode_all_rgba(output)
+                self.assertEqual(len(frames), 22)
+                self.assertEqual(int(frames[..., 3].min()), 255)   # fully opaque
+                self.assertLess(frames[0, 5, 5, :3].max(), 20)    # black background kept
+                self.assertLess(np.abs(frames[3].astype(int) - frames[19]).mean(), 1.5)
+
+    def test_mp4_requires_background_removal_off(self) -> None:
+        clip = make_clip(self.folder / "clip.mp4")
+        with self.assertRaises(MediaError):
+            export(clip, self.folder / "out.mp4", preset("soft"), "mp4")
+        self.assertEqual(default_output_path(clip, "mp4", remove_background=False).name,
+                         "clip-export.mp4")
+
     def test_cancel_removes_partial_output(self) -> None:
         clip = make_clip(self.folder / "clip.mp4", frames=24)
         cancel = threading.Event()

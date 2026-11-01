@@ -8,6 +8,10 @@ video background into a transparent alpha channel**, optionally makes it a seaml
 | --- | --- | --- | --- |
 | **WebM** (VP9 + alpha) | `.webm` | small, often 20–60× smaller than ProRes | Default. Uploading and caching on the mini PCs. |
 | **ProRes 4444** | `.mov` | large, roughly 30–40 MB per second at 1080p | Maximum fidelity, or as a master to re-edit later. |
+| **MP4** (H.264) | `.mp4` | small | Only with background removal off (MP4 can't hold transparency). |
+
+Background removal can also be switched off entirely, to just make a mirror loop
+of an ordinary video.
 
 It is not a video editor in the timeline sense. You open a clip, pick the background
 color and key style, check the result over a test backdrop, and export.
@@ -35,6 +39,10 @@ peak-video-editor clip.mp4        # opens with a clip already loaded
 The app runs a small local server on `127.0.0.1`; nothing leaves your machine.
 Drop a video onto the preview (or use **Open video**), then:
 
+0. **Remove background** (on by default). Switch it off to export the video as-is.
+   The key settings grey out, the output is opaque, and the formats become WebM
+   (VP9), ProRes 422 HQ and MP4 (H.264). Combine with **Mirror loop** to quickly
+   loop a normal clip.
 1. **Background to remove**: Black, White, or **Color**. For Color, click
    **Pick from video** and click the background in the preview (it samples a small
    patch, so noise doesn't matter). You can also type a hex value or use the color
@@ -86,6 +94,7 @@ peak-key logo.mp4 -b white -p hard -f prores        # -> logo-alpha.mov
 peak-key smoke.mp4 --threshold 0.06 --crf 24        # tweak the key and WebM quality
 peak-key talent.mp4 -b "#2aa34a" -p soft            # green screen, picked color
 peak-key embers.mp4 --mirror-loop                   # forward + reverse seamless loop
+peak-key waves.mp4 --no-key --mirror-loop           # just loop it, no keying -> waves-loop.mp4
 peak-key clips/*.mp4 -o keyed/                      # batch into a folder
 peak-key --help
 ```

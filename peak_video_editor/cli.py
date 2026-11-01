@@ -27,8 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
                              "#00b140 for a green screen (default black).")
     parser.add_argument("-p", "--preset", choices=sorted(PRESETS), default="soft",
                         help="soft = glows/smoke/light (luma key); hard = solid objects.")
-    parser.add_argument("-f", "--format", choices=sorted(FORMATS), default="webm",
-                        help="webm = small VP9 file; prores = large ProRes 4444 master.")
+    parser.add_argument("-f", "--format", choices=sorted(FORMATS), default=None,
+                        help="webm = small VP9 file (default); prores = large ProRes master; "
+                             "mp4 = H.264, only with --no-key (default with --no-key).")
+    parser.add_argument("-n", "--no-key", action="store_true",
+                        help="Keep the background (no transparency); e.g. just make a mirror loop.")
     parser.add_argument("--threshold", type=float, help="0-1. Override the preset threshold.")
     parser.add_argument("--softness", type=float, help="0-1. Override the preset softness.")
     parser.add_argument("--protect-interior", dest="protect_interior",
@@ -48,6 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.format is None:
+        args.format = "mp4" if args.no_key else "webm"
+    if args.format == "mp4" and not args.no_key:
+        print("peak-key: MP4 cannot hold transparency; use --no-key or choose webm/prores.",
+              file=sys.stderr)
+        return 2
+    if args.no_key and not args.mirror_loop:
+        print("peak-key: note: --no-key without --mirror-loop just re-encodes the video.",
+              file=sys.stderr)
     background = args.background.strip().lower()
     try:
         if background in ("black", "white"):
@@ -68,15 +80,20 @@ def main(argv: list[str] | None = None) -> int:
 
     failures = 0
     for source in args.input:
-        destination = _destination(source, args.output, args.format, len(args.input) > 1)
+        destination = _destination(source, args.output, args.format, len(args.input) > 1,
+                                   not args.no_key, args.mirror_loop)
         try:
             info = probe(source)
             print(f"{source.name}: {info.width}x{info.height} @ {float(info.frame_rate):.3g} fps, "
                   f"{info.frame_count} frames -> {destination}")
             export(source, destination, settings, args.format, webm_crf=args.crf,
-                   progress=_progress_printer(), mirror_loop=args.mirror_loop)
-            low, high = read_alpha_range(destination)
-            print(f"\n  done. alpha range in first frame: {low}-{high}")
+                   progress=_progress_printer(), mirror_loop=args.mirror_loop,
+                   remove_background=not args.no_key)
+            if args.no_key:
+                print("\n  done.")
+            else:
+                low, high = read_alpha_range(destination)
+                print(f"\n  done. alpha range in first frame: {low}-{high}")
         except MediaError as error:
             failures += 1
             print(f"\npeak-key: {source.name}: {error}", file=sys.stderr)
@@ -86,11 +103,14 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if failures else 0
 
 
-def _destination(source: Path, output: Path | None, export_format: str, many: bool) -> Path:
+def _destination(source: Path, output: Path | None, export_format: str, many: bool,
+                 remove_background: bool = True, mirror_loop: bool = False) -> Path:
+    default = default_output_path(source, export_format,  # type: ignore[arg-type]
+                                  remove_background, mirror_loop)
     if output is None:
-        return default_output_path(source, export_format)  # type: ignore[arg-type]
+        return default
     if many or output.is_dir() or not output.suffix:
-        return output / default_output_path(source, export_format).name  # type: ignore[arg-type]
+        return output / default.name
     return output
 
 

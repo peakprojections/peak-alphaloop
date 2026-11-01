@@ -31,7 +31,7 @@ from PIL import Image
 from . import __version__
 from .keying import COLOR_PRESETS, PRESETS, KeySettings, alpha_matte, key_frame
 from .media import (DEFAULT_WEBM_CRF, FORMATS, ExportCancelled, MediaError, VideoInfo,
-                    export, mirrored_frame_count, probe, read_frame)
+                    export, mirrored_frame_count, output_suffix, probe, read_frame)
 
 PREVIEW_MAX_WIDTH = 960
 UPLOAD_CHUNK = 1024 * 1024
@@ -54,6 +54,7 @@ class Job:
     settings: KeySettings
     output: Path
     mirror_loop: bool = False
+    remove_background: bool = True
     status: str = "running"  # running | done | error | cancelled
     done: int = 0
     total: int = 0
@@ -68,6 +69,7 @@ class Job:
             "id": self.id, "status": self.status, "done": self.done, "total": self.total,
             "error": self.error, "format": self.export_format, "elapsed": round(elapsed, 1),
             "filename": self.output.name, "mirror_loop": self.mirror_loop,
+            "remove_background": self.remove_background,
         }
         if self.status == "done" and self.output.is_file():
             data["size"] = self.output.stat().st_size
@@ -115,16 +117,19 @@ class Workspace:
         return frame
 
     def start_job(self, clip: Clip, export_format: str, settings: KeySettings, crf: int,
-                  mirror_loop: bool = False) -> Job:
+                  mirror_loop: bool = False, remove_background: bool = True) -> Job:
         if export_format not in FORMATS:
             raise ValueError("Unknown export format.")
+        if remove_background and not FORMATS[export_format]["alpha"]:
+            raise ValueError("MP4 cannot hold transparency; turn background removal off "
+                             "or choose WebM or ProRes.")
         job_id = uuid.uuid4().hex
         stem = Path(clip.display_name).stem or "video"
         folder = self.root / "exports" / job_id
         folder.mkdir()
-        suffix = "-alpha-loop" if mirror_loop else "-alpha"
+        suffix = output_suffix(remove_background, mirror_loop)
         output = folder / f"{stem}{suffix}{FORMATS[export_format]['suffix']}"
-        job = Job(job_id, clip, export_format, settings, output, mirror_loop)
+        job = Job(job_id, clip, export_format, settings, output, mirror_loop, remove_background)
         with self.lock:
             self.jobs[job_id] = job
 
@@ -135,7 +140,7 @@ class Workspace:
             try:
                 export(clip.path, output, settings, export_format,  # type: ignore[arg-type]
                        webm_crf=crf, progress=progress, cancel=job.cancel,
-                       mirror_loop=mirror_loop)
+                       mirror_loop=mirror_loop, remove_background=remove_background)
                 job.status = "done"
             except ExportCancelled:
                 job.status = "cancelled"
@@ -287,13 +292,15 @@ def make_handler(workspace: Workspace):
             if not 4 <= crf <= 63:
                 raise ValueError("WebM quality must be between 4 and 63.")
             job = workspace.start_job(clip, str(payload.get("format", "webm")), settings, crf,
-                                      bool(payload.get("mirror_loop", False)))
+                                      bool(payload.get("mirror_loop", False)),
+                                      bool(payload.get("remove_background", True)))
             self._json(job.to_dict())
 
         def _send_file(self, job: Job, attachment: bool) -> None:
             if job.status != "done" or not job.output.is_file():
                 raise LookupError("Export is not finished.")
-            content_type = "video/webm" if job.output.suffix == ".webm" else "video/quicktime"
+            content_type = {".webm": "video/webm", ".mp4": "video/mp4"}.get(
+                job.output.suffix, "video/quicktime")
             size = job.output.stat().st_size
             start, end = 0, size - 1
             status = HTTPStatus.OK

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "peak-video-editor"
-version = "0.2.0"
+version = "0.3.0"
 description = "Peak Projections tool that keys black or white video backgrounds to alpha (WebM VP9 / ProRes 4444)"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -14,7 +14,7 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-size: 14px; }
   button, input, select { font: inherit; color: inherit; }
-  .app { display: grid; grid-template-columns: 1fr 340px; height: 100vh; }
+  .app { display: grid; grid-template-columns: 1fr 340px; height: 100vh; height: 100dvh; }
   header { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 12px 18px;
            border-bottom: 1px solid var(--line); background: var(--panel); }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
@@ -41,7 +41,10 @@
       linear-gradient(45deg, transparent 75%, #3a414d 75%),
       linear-gradient(-45deg, transparent 75%, #3a414d 75%);
     background-size: 24px 24px; background-position: 0 0, 0 12px, 12px -12px, -12px 0; }
-  .canvas img, .canvas video { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+  /* Pin media to the box so it always scales down to fit (intrinsic size would
+     otherwise push a tall video, and its controls, past the bottom edge). */
+  .canvas img, .canvas video { position: absolute; inset: 0; width: 100%; height: 100%;
+                               object-fit: contain; display: block; }
   .canvas .busy { position: absolute; top: 10px; right: 12px; font-size: 12px; color: var(--muted);
                   background: rgba(0,0,0,.45); padding: 3px 8px; border-radius: 6px; display: none; }
   .canvas.loading .busy { display: block; }
@@ -92,6 +95,20 @@
   .result { display: none; margin-top: 10px; gap: 8px; flex-direction: column; }
   .result.show { display: flex; }
   .hidden { display: none !important; }
+  .switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .switch b { display: block; font-size: 13px; }
+  .switch span { color: var(--muted); font-size: 11.5px; }
+  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .switch .track { flex: none; width: 38px; height: 22px; border-radius: 11px; background: #3a4558;
+    position: relative; transition: background .15s; }
+  .switch .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
+    border-radius: 50%; background: #fff; transition: transform .15s; }
+  .switch input:checked + .track { background: var(--accent-2); }
+  .switch input:checked + .track::after { transform: translateX(16px); }
+  .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .keyonly.off { opacity: .35; pointer-events: none; user-select: none; }
+  .row.formats > * { min-width: 0; }
   .row.three > * { min-width: 0; }
   .keycolor { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .keycolor .pickrow { display: flex; gap: 8px; align-items: center; }
@@ -158,6 +175,13 @@
     </section>
 
     <section>
+      <label class="switch" title="Turn off to just re-encode or mirror-loop the video as-is">
+        <div><b>Remove background</b><span id="keyToggleHint">Make the background transparent.</span></div>
+        <input type="checkbox" id="removeBg" checked><i class="track"></i>
+      </label>
+    </section>
+
+    <section class="keyonly">
       <h2>Background to remove</h2>
       <div class="row three" id="bgSeg">
         <button class="choice on" data-bg="black"><b><i class="swatch" style="background:#000"></i>Black</b></button>
@@ -177,7 +201,7 @@
       </div>
     </section>
 
-    <section>
+    <section class="keyonly">
       <h2>Key style</h2>
       <div class="row" id="presetSeg">
         <button class="choice on" data-preset="soft"><b>Soft</b><span>Glows, smoke, light, particles</span></button>
@@ -185,7 +209,7 @@
       </div>
     </section>
 
-    <section>
+    <section class="keyonly">
       <h2>Fine tune</h2>
       <div class="slider">
         <div class="top"><label for="threshold">Threshold</label><span class="val" id="thresholdVal"></span></div>
@@ -205,9 +229,10 @@
 
     <section>
       <h2>Export</h2>
-      <div class="row" id="formatSeg">
-        <button class="choice on" data-format="webm"><b>WebM</b><span>VP9 + alpha · small files</span></button>
-        <button class="choice" data-format="prores"><b>ProRes 4444</b><span>.mov · large, lossless-ish</span></button>
+      <div class="row formats" id="formatSeg">
+        <button class="choice on" data-format="webm"><b>WebM</b><span id="webmDesc">VP9 + alpha · small files</span></button>
+        <button class="choice" data-format="prores"><b id="proresName">ProRes 4444</b><span>.mov · large, lossless-ish</span></button>
+        <button class="choice hidden" data-format="mp4"><b>MP4</b><span>H.264 · plays anywhere</span></button>
       </div>
       <div class="slider" id="crfBox" style="margin-top:12px">
         <div class="top"><label for="crf">WebM quality</label><span class="val" id="crfVal"></span></div>
@@ -235,7 +260,7 @@ const state = {
   clip: null, view: "result", backdrop: "checker", preset: "soft", format: "webm",
   settings: { background: "black", threshold: 0.03, softness: 0.97, unblend: true, protect_interior: false,
               key_color: "#00b140", despill: true },
-  presets: {}, colorPresets: {}, crf: 30, job: null, previewToken: 0, picking: false, mirrorLoop: false,
+  presets: {}, colorPresets: {}, crf: 30, job: null, previewToken: 0, picking: false, mirrorLoop: false, removeBg: true,
 };
 
 async function api(path, options = {}) {
@@ -282,9 +307,21 @@ function syncControls() {
   $("crfBox").classList.toggle("hidden", state.format !== "webm");
   selectIn("bgSeg", "bg", s.background); selectIn("presetSeg", "preset", state.preset);
   selectIn("formatSeg", "format", state.format);
-  selectIn("viewSeg", "view", state.view); selectIn("backdropSeg", "backdrop", state.backdrop);
+  selectIn("viewSeg", "view", state.removeBg ? state.view : "original");
+  selectIn("backdropSeg", "backdrop", state.backdrop);
+  $("removeBg").checked = state.removeBg;
+  for (const el of document.querySelectorAll(".keyonly")) el.classList.toggle("off", !state.removeBg);
+  for (const b of $("viewSeg").querySelectorAll("button")) b.disabled = !state.removeBg && b.dataset.view !== "original";
+  for (const b of $("backdropSeg").querySelectorAll("button")) b.disabled = !state.removeBg;
+  $("keyToggleHint").textContent = state.removeBg ? "Make the background transparent."
+    : "Off: video is exported as-is (good for a quick mirror loop).";
+  $("formatSeg").querySelector('[data-format="mp4"]').classList.toggle("hidden", state.removeBg);
+  $("formatSeg").classList.toggle("three", !state.removeBg);
+  $("webmDesc").textContent = state.removeBg ? "VP9 + alpha · small files" : "VP9 · small files";
+  $("proresName").textContent = state.removeBg ? "ProRes 4444" : "ProRes 422 HQ";
   const canvas = $("canvas");
-  const showBackdrop = state.view === "result" || !$("playback").classList.contains("hidden");
+  const showBackdrop = state.removeBg &&
+    (state.view === "result" || !$("playback").classList.contains("hidden"));
   canvas.classList.toggle("checker", showBackdrop && state.backdrop === "checker");
   canvas.style.backgroundColor = showBackdrop && state.backdrop !== "checker" ? state.backdrop : "";
   if (!showBackdrop) canvas.style.backgroundColor = "#0a0c10";
@@ -301,7 +338,8 @@ async function updatePreview() {
   const token = ++state.previewToken;
   const t = (Number($("time").value) / 1000) * state.clip.duration;
   $("timeLabel").textContent = `${fmtTime(t)} / ${fmtTime(state.clip.duration)}`;
-  const q = new URLSearchParams({ t: t.toFixed(3), view: state.view, ...Object.fromEntries(
+  const view = state.removeBg ? state.view : "original";
+  const q = new URLSearchParams({ t: t.toFixed(3), view, ...Object.fromEntries(
     Object.entries(state.settings).map(([k, v]) => [k, String(v)])) });
   $("canvas").classList.add("loading");
   try {
@@ -366,7 +404,7 @@ async function startExport() {
     const job = await api(`/api/clips/${state.clip.id}/export`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ format: state.format, settings: state.settings, crf: state.crf,
-                             mirror_loop: state.mirrorLoop }),
+                             mirror_loop: state.mirrorLoop, remove_background: state.removeBg }),
     });
     state.job = job; pollJob();
   } catch (e) { finishRun(); setStatus(e.message, "err"); }
@@ -389,7 +427,7 @@ async function pollJob() {
     if (job.status === "done") {
       setStatus(`Done in ${job.elapsed}s · ${job.filename} · ${fmtBytes(job.size)}`, "ok");
       $("download").href = job.download; $("download").setAttribute("download", job.filename);
-      $("playBtn").classList.toggle("hidden", job.format !== "webm");
+      $("playBtn").classList.toggle("hidden", job.format === "prores");
       $("result").classList.add("show");
     } else if (job.status === "cancelled") { setStatus("Export cancelled."); $("bar").style.width = "0"; }
     else setStatus(job.error || "Export failed.", "err");
@@ -399,7 +437,7 @@ async function pollJob() {
 function finishRun() { $("exportBtn").disabled = !state.clip; $("cancelRun").classList.add("hidden"); }
 
 function playResult() {
-  if (!state.job || state.job.format !== "webm") return;
+  if (!state.job || state.job.format === "prores") return;
   const video = $("playback");
   video.src = `${state.job.stream}?v=${state.job.id}`;
   $("preview").classList.add("hidden"); video.classList.remove("hidden");
@@ -447,13 +485,24 @@ $("keyHex").onblur = () => syncControls();
 $("pickBtn").onclick = () => { if (!state.clip) return; state.picking = !state.picking; syncControls(); };
 $("despill").onchange = (e) => { state.settings.despill = e.target.checked; schedulePreview(0); };
 $("mirrorLoop").onchange = (e) => { state.mirrorLoop = e.target.checked; syncControls(); };
+$("removeBg").onchange = (e) => {
+  state.removeBg = e.target.checked;
+  if (state.removeBg && state.format === "mp4") state.format = "webm";
+  if (!state.removeBg) state.picking = false;
+  syncControls(); schedulePreview(0);
+};
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && state.picking) { state.picking = false; syncControls(); }
 });
 $("preview").addEventListener("click", async (e) => {
   if (!state.picking || !state.clip) return;
-  const rect = e.target.getBoundingClientRect();
-  const x = (e.clientX - rect.left) / rect.width, y = (e.clientY - rect.top) / rect.height;
+  // The image is letterboxed (object-fit: contain); map the click into the picture itself.
+  const img = e.target, box = img.getBoundingClientRect();
+  const scale = Math.min(box.width / img.naturalWidth, box.height / img.naturalHeight);
+  const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
+  const left = box.left + (box.width - w) / 2, top = box.top + (box.height - h) / 2;
+  const x = (e.clientX - left) / w, y = (e.clientY - top) / h;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return;   // clicked the empty border
   const t = (Number($("time").value) / 1000) * state.clip.duration;
   try {
     const { color } = await api(`/api/clips/${state.clip.id}/sample?` +
