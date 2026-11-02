@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: "Platforms to build (comma separated: windows, macos, linux)"
-        default: "windows,macos,linux"
+        description: "Platforms to build (comma separated: windows, macos, macos-intel, linux)"
+        default: "windows,macos,macos-intel,linux"
         required: true
 
 permissions:
@@ -25,10 +25,12 @@ jobs:
       - id: plan
         shell: python
         env:
-          REQUESTED: ${{ github.event.inputs.platforms || 'windows,macos,linux' }}
+          REQUESTED: ${{ github.event.inputs.platforms || 'windows,macos,macos-intel,linux' }}
         run: |
           import json, os
-          runners = {"windows": "windows-latest", "macos": "macos-14", "linux": "ubuntu-22.04"}
+          # macos-15-intel is GitHub's last Intel Mac runner (supported until about August 2027).
+          runners = {"windows": "windows-latest", "macos": "macos-14",
+                     "macos-intel": "macos-15-intel", "linux": "ubuntu-22.04"}
           wanted = [p.strip() for p in os.environ["REQUESTED"].split(",") if p.strip() in runners]
           include = [{"platform": p, "os": runners[p]} for p in wanted]
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:

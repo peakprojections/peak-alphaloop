@@ -6,7 +6,8 @@
 Produces one file in ``release/``:
 
     PeakAlphaloop-<version>-windows-x64-setup.exe   (per-user installer)
-    PeakAlphaloop-<version>-macos-arm64.zip         (Peak Alphaloop.app)
+    PeakAlphaloop-<version>-macos-arm64.zip         (Peak Alphaloop.app, Apple silicon)
+    PeakAlphaloop-<version>-macos-x64.zip           (Peak Alphaloop.app, Intel Macs)
     PeakAlphaloop-<version>-linux-x64.tar.xz        (folder with the app)
 
 and finishes by running the built app's ``--self-test``.
@@ -38,6 +39,13 @@ from peak_alphaloop import __version__ as VERSION  # noqa: E402
 from peak_alphaloop.updater import ASSET_SUFFIXES  # noqa: E402
 
 MAC_FFMPEG = "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/{}.zip"
+# Martin Riedl no longer builds for Intel; evermeet.cx does, with OSXExperts as a fallback.
+INTEL_MAC_FFMPEG = {
+    "ffmpeg": ["https://evermeet.cx/ffmpeg/getrelease/zip",
+               "https://www.osxexperts.net/ffmpeg80intel.zip"],
+    "ffprobe": ["https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip",
+                "https://www.osxexperts.net/ffprobe80intel.zip"],
+}
 
 
 def log(message: str) -> None:
@@ -53,7 +61,7 @@ def platform_key() -> str:
     if sys.platform.startswith("win"):
         return "windows"
     if sys.platform == "darwin":
-        return "macos"
+        return "macos-intel" if platform.machine() == "x86_64" else "macos"
     return "linux"
 
 
@@ -95,9 +103,19 @@ def fetch_ffmpeg(key: str, target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as folder:
         work = Path(folder)
-        if key == "macos":
+        if key.startswith("macos"):
             for name in ("ffmpeg", "ffprobe"):
-                archive = download(MAC_FFMPEG.format(name), work / f"{name}.zip")
+                archive = work / f"{name}.zip"
+                urls = INTEL_MAC_FFMPEG[name] if key == "macos-intel" else [MAC_FFMPEG.format(name)]
+                for index, url in enumerate(urls):
+                    try:
+                        download(url, archive)
+                        zipfile.ZipFile(archive).close()  # reject error pages
+                        break
+                    except Exception as error:
+                        if index == len(urls) - 1:
+                            raise
+                        log(f"  {url} failed ({error}); trying the next source")
                 with zipfile.ZipFile(archive) as bundle:
                     bundle.extractall(work / name)
                 binary = next(path for path in (work / name).rglob(name) if path.is_file())
@@ -171,18 +189,18 @@ def pyinstaller(key: str, ffmpeg_dir: Path, licenses: Path, icons: Path) -> Path
     # FFmpeg is a separate program, not a Python extension. On Windows/Linux add it as
     # plain files so PyInstaller doesn't copy its shared libraries a second time; macOS
     # needs it treated as a binary so it is placed and signed correctly in the .app.
-    kind = "--add-binary" if key == "macos" else "--add-data"
+    kind = "--add-binary" if key.startswith("macos") else "--add-data"
     for item in sorted(path for path in ffmpeg_dir.rglob("*") if path.is_file()):
         folder = Path("ffmpeg") / item.parent.relative_to(ffmpeg_dir)
         command += [kind, f"{item}{sep}{folder.as_posix()}"]
     if key == "windows":
         command += ["--windowed", "--icon", icons / "icon.ico"]
-    elif key == "macos":
+    elif key.startswith("macos"):
         command += ["--windowed", "--icon", icons / "icon.icns",
                     "--osx-bundle-identifier", "com.peakprojections.alphaloop"]
     command.append(ROOT / "packaging" / "alphaloop_main.py")
     run(command)
-    built = BUILD / "dist" / (f"{APP}.app" if key == "macos" else APP)
+    built = BUILD / "dist" / (f"{APP}.app" if key.startswith("macos") else APP)
     if key == "linux":
         for binary in built.rglob("ffmpeg/bin/*"):
             binary.chmod(0o755)
@@ -207,6 +225,13 @@ def finish_macos(app: Path) -> Path:
         shutil.rmtree(final)
     app.rename(final)
     run(["codesign", "--force", "--deep", "--sign", "-", final])
+    # Record the oldest macOS the bundled pieces support (for the README/release notes).
+    for binary in (final / "Contents" / "MacOS" / APP, *sorted((final / "Contents" / "Frameworks").rglob("ffmpeg"))[:1]):
+        if binary.is_file():
+            loads = subprocess.run(["otool", "-l", str(binary)], capture_output=True, text=True).stdout
+            found = (re.findall(r"minos (\d+(?:\.\d+)*)", loads)
+                     or re.findall(r"LC_VERSION_MIN_MACOSX\n.*\n\s*version (\d+(?:\.\d+)*)", loads))
+            log(f"  {binary.name}: minimum macOS {found[0] if found else 'unknown'}")
     return final
 
 
@@ -237,7 +262,7 @@ def package(key: str, built: Path, icons: Path) -> Path:
             run(["choco", "install", "innosetup", "-y", "--no-progress"])
         run([iscc, f"/DAppVersion={VERSION}", f"/DSourceDir={built}", f"/DOutputDir={RELEASE}",
              f"/DOutputName={output.stem}", ROOT / "packaging" / "windows" / "installer.iss"])
-    elif key == "macos":
+    elif key.startswith("macos"):
         run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", built, output])
     else:
         shutil.copy2(icons / "icon.png", built / "peak-alphaloop.png")
@@ -296,7 +321,7 @@ def main() -> int:
     run([sys.executable, ROOT / "packaging" / "make_icon.py", icons])
 
     built = pyinstaller(key, ffmpeg_dir, licenses, icons)
-    if key == "macos":
+    if key.startswith("macos"):
         built = finish_macos(built)
         executable = built / "Contents" / "MacOS" / APP
     else:

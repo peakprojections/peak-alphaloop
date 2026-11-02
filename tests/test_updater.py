@@ -14,6 +14,7 @@ def release(tag: str, names: list[str]) -> bytes:
 
 
 ASSETS = ["PeakAlphaloop-9.0.0-windows-x64-setup.exe", "PeakAlphaloop-9.0.0-macos-arm64.zip",
+          "PeakAlphaloop-9.0.0-macos-x64.zip",
           "PeakAlphaloop-9.0.0-linux-x64.tar.xz", "SHA256SUMS.txt"]
 
 
@@ -59,6 +60,15 @@ class UpdaterTests(unittest.TestCase):
                 mock.patch.object(updater, "_get") as get:
             self.assertTrue(updater.check()["disabled"])
             get.assert_not_called()
+
+    def test_platform_detection(self) -> None:
+        cases = [("win32", "AMD64", "windows"), ("darwin", "arm64", "macos"),
+                 ("darwin", "x86_64", "macos-intel"), ("linux", "x86_64", "linux")]
+        for system, machine, expected in cases:
+            with self.subTest(system=system, machine=machine), \
+                    mock.patch.object(updater.sys, "platform", system), \
+                    mock.patch.object(updater.platform, "machine", return_value=machine):
+                self.assertEqual(updater.platform_key(), expected)
 
     def test_checksum_lookup(self) -> None:
         sums = "abc123  PeakAlphaloop-9.0.0-windows-x64-setup.exe\ndef456 *other.zip\n"

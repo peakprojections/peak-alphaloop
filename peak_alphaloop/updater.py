@@ -36,6 +36,7 @@ CHECKSUMS_NAME = "SHA256SUMS.txt"
 ASSET_SUFFIXES = {
     "windows": "windows-x64-setup.exe",
     "macos": "macos-arm64.zip",
+    "macos-intel": "macos-x64.zip",
     "linux": "linux-x64.tar.xz",
 }
 CACHE_SECONDS = 6 * 3600
@@ -57,7 +58,7 @@ def platform_key() -> str:
     if sys.platform.startswith("win"):
         return "windows"
     if sys.platform == "darwin":
-        return "macos"
+        return "macos-intel" if platform.machine() == "x86_64" else "macos"
     return "linux"
 
 

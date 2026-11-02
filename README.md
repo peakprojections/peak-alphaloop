@@ -60,7 +60,8 @@ Get the file for your system from the
 | System | File | Notes |
 | --- | --- | --- |
 | Windows 10/11 (64-bit) | `PeakAlphaloop-<version>-windows-x64-setup.exe` | Installs for your user only; no admin rights needed. |
-| macOS (Apple silicon) | `PeakAlphaloop-<version>-macos-arm64.zip` | Unzip and drag **Peak Alphaloop** to Applications. |
+| macOS (Apple silicon: M1 and newer) | `PeakAlphaloop-<version>-macos-arm64.zip` | Unzip and drag **Peak Alphaloop** to Applications. |
+| macOS (Intel) | `PeakAlphaloop-<version>-macos-x64.zip` | Same as above. Not sure which you have? ** → About This Mac** says "Chip: Apple M…" or "Processor: Intel…". |
 | Linux (x86-64) | `PeakAlphaloop-<version>-linux-x64.tar.xz` | Extract, then run `PeakAlphaloop` (or `install-desktop-entry.sh` to add it to your menu). |
 
 FFmpeg is included; there is nothing else to install.
@@ -161,7 +162,31 @@ Browsers and ProRes 4444 need no special handling.
   **Protect interior** is on, and that only helps for regions fully enclosed by the subject.
 - One key setting for the whole timeline; no garbage mattes or per-clip keys yet.
 - No transitions, titles or effects. It's deliberately a small tool.
-- macOS downloads are for Apple silicon. Intel Macs can run it from source.
+- Intel Mac downloads are built on GitHub's last Intel macOS runner, which GitHub plans to
+  retire around August 2027. After that, Intel Macs can still run Peak Alphaloop from source
+  (see below).
+
+## Running from source
+
+Works on any system with Python 3.11+ and FFmpeg, including Intel Macs.
+
+1. Install Python from [python.org](https://www.python.org/downloads/) (on macOS, also run
+   *Install Certificates.command* from the Python folder in Applications).
+2. Install FFmpeg: `brew install ffmpeg` on macOS with Homebrew, `sudo apt install ffmpeg`
+   on Debian/Ubuntu, or download a static build and put `ffmpeg` and `ffprobe` on your `PATH`.
+3. Get this repository (`git clone` or **Code → Download ZIP**), then:
+
+   ```bash
+   cd peak-alphaloop
+   python3 -m venv ~/alphaloop-env
+   ~/alphaloop-env/bin/pip install .
+   ~/alphaloop-env/bin/alphaloop --self-test   # should end with "ok": true
+   ~/alphaloop-env/bin/alphaloop               # opens the app
+   ```
+
+   (On Windows use `%USERPROFILE%\alphaloop-env\Scripts\` instead of `~/alphaloop-env/bin/`.)
+
+To update, get the new code and run the `pip install .` step again.
 
 ## Development
 
@@ -172,7 +197,8 @@ python packaging/build_standalone.py          # standalone build for this OS
 ```
 
 Releases are built by GitHub Actions: pushing a tag `vX.Y.Z` that matches
-`peak_alphaloop/__init__.py` builds all three platforms, runs a self-test of each
+`peak_alphaloop/__init__.py` builds every platform (Windows, macOS Apple silicon,
+macOS Intel, Linux), runs a self-test of each
 packaged app (real keying, looping and audio exports with the bundled FFmpeg),
 and publishes the release with `SHA256SUMS.txt`.
 
