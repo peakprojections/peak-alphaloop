@@ -7,8 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-from peak_video_editor.keying import preset
-from peak_video_editor.media import (ExportCancelled, MediaError, default_output_path, export,
+from peak_alphaloop.keying import preset
+from peak_alphaloop.media import (ExportCancelled, MediaError, default_output_path, export,
                                      mirrored_frame_count, probe, read_alpha_range, read_frame)
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None

@@ -1,25 +1,39 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "peak-video-editor"
-version = "0.3.0"
-description = "Peak Projections tool that keys black or white video backgrounds to alpha (WebM VP9 / ProRes 4444)"
+name = "peak-alphaloop"
+version = "1.0.0"
+description = "Simple video tool: remove black, white or green-screen backgrounds to alpha, make seamless mirror loops, and do basic multi-clip edits"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Peak Projections", email = "jesse@peakprojections.com" }]
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
     "pillow>=10",
     "scipy>=1.11",
 ]
+keywords = ["video", "alpha", "chroma key", "green screen", "transparent", "webm", "prores", "loop"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Video :: Conversion",
+    "Environment :: Web Environment",
+]
+
+[project.urls]
+Homepage = "https://github.com/peakprojections/peak-alphaloop"
+Issues = "https://github.com/peakprojections/peak-alphaloop/issues"
 
 [project.scripts]
-peak-video-editor = "peak_video_editor.server:main"
-peak-key = "peak_video_editor.cli:main"
+alphaloop = "peak_alphaloop.server:main"
+alphaloop-cli = "peak_alphaloop.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["peak_video_editor*"]
+include = ["peak_alphaloop*"]
 
 [tool.setuptools.package-data]
-peak_video_editor = ["static/*"]
+peak_alphaloop = ["static/*"]

@@ -1,16 +1,26 @@
-"""Local web app: preview and export alpha videos from a browser window.
+"""Local web app: edit, key and export videos from a browser window.
 
-Run ``peak-video-editor`` and it opens http://127.0.0.1:<port> in the default
-browser. Everything runs on this machine; nothing is uploaded anywhere else.
+Run ``alphaloop`` and it opens the app in your default browser. Everything
+runs on this machine; videos are never uploaded anywhere else.
+
+The server only listens on 127.0.0.1 and only answers requests that carry the
+per-session token it hands to the browser it opened (as a SameSite=Strict
+cookie) and that address it by its own host name. Other web pages open in the
+same browser therefore cannot drive it.
 """
 
 from __future__ import annotations
 
 import argparse
+import hmac
 import io
 import json
+import os
 import re
+import secrets
 import shutil
+import signal
+import sys
 import tempfile
 import threading
 import time
@@ -28,14 +38,17 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 import numpy as np
 from PIL import Image
 
-from . import __version__
+from . import __version__, updater
 from .keying import COLOR_PRESETS, PRESETS, KeySettings, alpha_matte, key_frame
-from .media import (DEFAULT_WEBM_CRF, FORMATS, ExportCancelled, MediaError, VideoInfo,
-                    export, mirrored_frame_count, output_suffix, probe, read_frame)
+from .media import (DEFAULT_WEBM_CRF, FORMATS, Canvas, ExportCancelled, MediaError, Segment,
+                    VideoInfo, export_timeline, output_suffix, pad_color, probe, read_frame,
+                    timeline_frame_count)
 
 PREVIEW_MAX_WIDTH = 960
 UPLOAD_CHUNK = 1024 * 1024
 ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+# A standalone app with no browser tab left open shuts itself down after this.
+IDLE_SHUTDOWN_SECONDS = 150
 
 
 @dataclass
@@ -49,9 +62,7 @@ class Clip:
 @dataclass
 class Job:
     id: str
-    clip: Clip
     export_format: str
-    settings: KeySettings
     output: Path
     mirror_loop: bool = False
     remove_background: bool = True
@@ -80,14 +91,17 @@ class Job:
 
 class Workspace:
     def __init__(self, root: Path | None = None) -> None:
-        self.root = root or Path(tempfile.mkdtemp(prefix="peak-video-editor-"))
+        self.root = root or Path(tempfile.mkdtemp(prefix="peak-alphaloop-"))
         (self.root / "uploads").mkdir(parents=True, exist_ok=True)
         (self.root / "exports").mkdir(parents=True, exist_ok=True)
         self.clips: dict[str, Clip] = {}
         self.jobs: dict[str, Job] = {}
-        self.frames: OrderedDict[tuple[str, float], np.ndarray] = OrderedDict()
+        self.frames: OrderedDict[tuple, np.ndarray] = OrderedDict()
         self.lock = threading.Lock()
+        self.last_seen: float | None = None
+        self.stop = threading.Event()
 
+    # ---- clips ---------------------------------------------------------------
     def add_clip(self, path: Path, display_name: str | None = None) -> Clip:
         info = probe(path)
         clip = Clip(uuid.uuid4().hex, path, info, display_name or path.name)
@@ -102,34 +116,43 @@ class Workspace:
             raise LookupError("Unknown clip.")
         return clip
 
-    def frame(self, clip: Clip, seconds: float) -> np.ndarray:
-        key = (clip.id, round(seconds, 3))
+    def frame(self, clip: Clip, seconds: float, canvas: Canvas | None = None,
+              pad_rgb: tuple[int, int, int] = (0, 0, 0),
+              max_width: int = PREVIEW_MAX_WIDTH) -> np.ndarray:
+        key = (clip.id, round(seconds, 3), canvas, pad_rgb, max_width)
         with self.lock:
             cached = self.frames.get(key)
             if cached is not None:
                 self.frames.move_to_end(key)
                 return cached
-        frame = read_frame(clip.path, seconds, PREVIEW_MAX_WIDTH)
+        frame = read_frame(clip.path, seconds, max_width, canvas, pad_rgb)
         with self.lock:
             self.frames[key] = frame
-            while len(self.frames) > 12:
+            while len(self.frames) > 48:
                 self.frames.popitem(last=False)
         return frame
 
-    def start_job(self, clip: Clip, export_format: str, settings: KeySettings, crf: int,
-                  mirror_loop: bool = False, remove_background: bool = True) -> Job:
+    # ---- exports -------------------------------------------------------------
+    def start_job(self, segments: list[Segment], name: str, export_format: str,
+                  settings: KeySettings, crf: int, mirror_loop: bool = False,
+                  remove_background: bool = True, include_audio: bool = False,
+                  canvas: Canvas | None = None) -> Job:
         if export_format not in FORMATS:
             raise ValueError("Unknown export format.")
         if remove_background and not FORMATS[export_format]["alpha"]:
             raise ValueError("MP4 cannot hold transparency; turn background removal off "
                              "or choose WebM or ProRes.")
+        if not segments:
+            raise ValueError("Add at least one clip to the timeline.")
         job_id = uuid.uuid4().hex
-        stem = Path(clip.display_name).stem or "video"
+        stem = Path(name).stem or "video"
         folder = self.root / "exports" / job_id
         folder.mkdir()
         suffix = output_suffix(remove_background, mirror_loop)
         output = folder / f"{stem}{suffix}{FORMATS[export_format]['suffix']}"
-        job = Job(job_id, clip, export_format, settings, output, mirror_loop, remove_background)
+        job = Job(job_id, export_format, output, mirror_loop, remove_background)
+        canvas = canvas or Canvas.of(probe(segments[0].path))
+        job.total = timeline_frame_count(segments, canvas, mirror_loop)
         with self.lock:
             self.jobs[job_id] = job
 
@@ -138,9 +161,10 @@ class Workspace:
 
         def run() -> None:
             try:
-                export(clip.path, output, settings, export_format,  # type: ignore[arg-type]
-                       webm_crf=crf, progress=progress, cancel=job.cancel,
-                       mirror_loop=mirror_loop, remove_background=remove_background)
+                export_timeline(segments, output, settings, export_format,  # type: ignore[arg-type]
+                                webm_crf=crf, progress=progress, cancel=job.cancel,
+                                mirror_loop=mirror_loop, remove_background=remove_background,
+                                include_audio=include_audio, canvas=canvas)
                 job.status = "done"
             except ExportCancelled:
                 job.status = "cancelled"
@@ -149,8 +173,6 @@ class Workspace:
             finally:
                 job.finished = time.monotonic()
 
-        job.total = (mirrored_frame_count(clip.info.frame_count) if mirror_loop
-                     else clip.info.frame_count)
         threading.Thread(target=run, name=f"export-{job_id[:8]}", daemon=True).start()
         return job
 
@@ -161,27 +183,45 @@ class Workspace:
             raise LookupError("Unknown export.")
         return job
 
+    def busy(self) -> bool:
+        with self.lock:
+            return any(job.status == "running" for job in self.jobs.values())
+
     def close(self) -> None:
         for job in list(self.jobs.values()):
             job.cancel.set()
         shutil.rmtree(self.root, ignore_errors=True)
 
 
-def render_preview(frame: np.ndarray, settings: KeySettings, view: str) -> bytes:
-    if view == "original":
+def render_preview(frame: np.ndarray, settings: KeySettings, view: str,
+                   image_format: str = "png") -> bytes:
+    if view == "original" or view == "plain":
         image = Image.fromarray(frame, "RGB")
     else:
         keyed = key_frame(frame, settings)
         image = (Image.fromarray(alpha_matte(keyed), "RGB") if view == "matte"
                  else Image.fromarray(keyed, "RGBA"))
     buffer = io.BytesIO()
-    image.save(buffer, "PNG", compress_level=1)
+    if image_format == "jpeg":
+        image.convert("RGB").save(buffer, "JPEG", quality=80)
+    else:
+        image.save(buffer, "PNG", compress_level=1)
     return buffer.getvalue()
 
 
-def make_handler(workspace: Workspace):
+def _canvas_from_query(workspace: Workspace, query: dict[str, str]) -> Canvas | None:
+    """The preview canvas is the first timeline clip's geometry (``canvas=<clip id>``)."""
+    canvas_id = query.get("canvas")
+    if not canvas_id or not ID_PATTERN.match(canvas_id):
+        return None
+    return Canvas.of(workspace.clip(canvas_id).info)
+
+
+def make_handler(workspace: Workspace, token: str | None = None):
+    """``token=None`` disables the session check (used only by unit tests)."""
+
     class Handler(BaseHTTPRequestHandler):
-        server_version = f"PeakVideoEditor/{__version__}"
+        server_version = f"PeakAlphaloop/{__version__}"
 
         def log_message(self, format: str, *args: Any) -> None:  # quiet console
             pass
@@ -196,13 +236,41 @@ def make_handler(workspace: Workspace):
         def do_PUT(self) -> None:
             self._dispatch("PUT")
 
+        @property
+        def _cookie_name(self) -> str:
+            return f"alphaloop_{self.server.server_address[1]}"
+
+        def _host_ok(self) -> bool:
+            port = self.server.server_address[1]
+            host = (self.headers.get("Host") or "").lower()
+            return host in {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+        def _session_ok(self) -> bool:
+            if token is None:
+                return True
+            for part in (self.headers.get("Cookie") or "").split(";"):
+                name, _, value = part.strip().partition("=")
+                if name == self._cookie_name and hmac.compare_digest(value, token):
+                    return True
+            return False
+
         def _dispatch(self, method: str) -> None:
             url = urlparse(self.path)
             parts = [part for part in url.path.split("/") if part]
             query = {key: values[-1] for key, values in parse_qs(url.query).items()}
             try:
+                if token is not None and not self._host_ok():
+                    return self._error(HTTPStatus.FORBIDDEN, "Unexpected host.")
                 if method == "GET" and not parts:
-                    return self._static("index.html", "text/html; charset=utf-8")
+                    return self._index(query)
+                if method == "GET" and parts == ["favicon.png"]:
+                    body = resources.files("peak_alphaloop").joinpath("static", "favicon.png").read_bytes()
+                    return self._send(HTTPStatus.OK, body, "image/png",
+                                      {"Cache-Control": "max-age=86400"})
+                if not self._session_ok():
+                    return self._error(HTTPStatus.FORBIDDEN,
+                                       "Session expired. Reopen Peak Alphaloop from its launcher.")
+                workspace.last_seen = time.monotonic()
                 if method == "GET" and parts == ["api", "config"]:
                     return self._json({
                         "version": __version__,
@@ -210,17 +278,31 @@ def make_handler(workspace: Workspace):
                         "color_presets": {name: s.to_dict() for name, s in COLOR_PRESETS.items()},
                         "formats": FORMATS, "default_crf": DEFAULT_WEBM_CRF,
                         "clips": [self._clip_dict(c) for c in workspace.clips.values()],
+                        "standalone": updater.is_standalone(),
                     })
+                if method == "POST" and parts == ["api", "ping"]:
+                    return self._json({"ok": True})
+                if method == "POST" and parts == ["api", "quit"]:
+                    self._json({"ok": True})
+                    workspace.stop.set()
+                    return None
+                if method == "GET" and parts == ["api", "update"]:
+                    return self._json(updater.check_cached())
+                if method == "POST" and parts == ["api", "update", "install"]:
+                    message = updater.install_update()
+                    self._json({"ok": True, "message": message})
+                    workspace.stop.set()
+                    return None
                 if method == "PUT" and parts == ["api", "upload"]:
                     return self._upload()
+                if method == "POST" and parts == ["api", "export"]:
+                    return self._export()
                 if len(parts) >= 3 and parts[:2] == ["api", "clips"]:
                     clip = workspace.clip(self._id(parts[2]))
                     if method == "GET" and parts[3:] == ["preview"]:
                         return self._preview(clip, query)
                     if method == "GET" and parts[3:] == ["sample"]:
                         return self._sample(clip, query)
-                    if method == "POST" and parts[3:] == ["export"]:
-                        return self._export(clip)
                 if len(parts) >= 3 and parts[:2] == ["api", "jobs"]:
                     job = workspace.job(self._id(parts[2]))
                     if method == "GET" and len(parts) == 3:
@@ -233,14 +315,37 @@ def make_handler(workspace: Workspace):
                 self._error(HTTPStatus.NOT_FOUND, "Not found.")
             except LookupError as error:
                 self._error(HTTPStatus.NOT_FOUND, str(error))
-            except (ValueError, KeyError) as error:
+            except (ValueError, KeyError, TypeError) as error:
                 self._error(HTTPStatus.BAD_REQUEST, str(error))
-            except MediaError as error:
+            except (MediaError, updater.UpdateError) as error:
                 self._error(HTTPStatus.UNPROCESSABLE_ENTITY, str(error))
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
         # ---- endpoints -----------------------------------------------------------
+        def _index(self, query: dict[str, str]) -> None:
+            supplied = query.get("token")
+            if token is not None and supplied is not None:
+                if not hmac.compare_digest(supplied, token):
+                    return self._error(HTTPStatus.FORBIDDEN, "Invalid session link.")
+                # Swap the one-time URL token for a cookie and drop it from the address bar.
+                self.send_response(HTTPStatus.SEE_OTHER)
+                self.send_header("Set-Cookie", f"{self._cookie_name}={token}; Path=/; "
+                                               "HttpOnly; SameSite=Strict")
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return None
+            if not self._session_ok():
+                body = ("<!DOCTYPE html><meta charset=utf-8><title>Peak Alphaloop</title>"
+                        "<body style='font-family:system-ui;background:#0d1016;color:#e8ecf3;"
+                        "padding:40px'><h1>Peak Alphaloop</h1><p>This session link is no longer "
+                        "valid. Start Peak Alphaloop again, or use the link it printed when it "
+                        "started.</p></body>").encode()
+                return self._send(HTTPStatus.FORBIDDEN, body, "text/html; charset=utf-8")
+            body = resources.files("peak_alphaloop").joinpath("static", "index.html").read_bytes()
+            self._send(HTTPStatus.OK, body, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+
         def _upload(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0:
@@ -269,14 +374,23 @@ def make_handler(workspace: Workspace):
             settings = KeySettings.from_dict(query)
             seconds = float(query.get("t", "0"))
             view = query.get("view", "result")
-            if view not in {"result", "matte", "original"}:
+            if view not in {"result", "matte", "original", "plain"}:
                 raise ValueError("Unknown view.")
-            body = render_preview(workspace.frame(clip, seconds), settings, view)
-            self._send(HTTPStatus.OK, body, "image/png", {"Cache-Control": "no-store"})
+            remove_background = view != "plain"
+            canvas = _canvas_from_query(workspace, query)
+            width = max(32, min(PREVIEW_MAX_WIDTH, int(query.get("w", PREVIEW_MAX_WIDTH))))
+            frame = workspace.frame(clip, seconds, canvas, pad_color(settings, remove_background),
+                                    width)
+            image_format = "jpeg" if query.get("format") == "jpeg" else "png"
+            body = render_preview(frame, settings, view, image_format)
+            self._send(HTTPStatus.OK, body, f"image/{image_format}",
+                       {"Cache-Control": "private, max-age=600" if image_format == "jpeg"
+                        else "no-store"})
 
         def _sample(self, clip: Clip, query: dict[str, str]) -> None:
             """Median color around a point; x and y are 0-1 fractions of the frame."""
-            frame = workspace.frame(clip, float(query.get("t", "0")))
+            canvas = _canvas_from_query(workspace, query)
+            frame = workspace.frame(clip, float(query.get("t", "0")), canvas)
             height, width = frame.shape[:2]
             x = min(width - 1, max(0, int(float(query["x"]) * width)))
             y = min(height - 1, max(0, int(float(query["y"]) * height)))
@@ -285,15 +399,33 @@ def make_handler(workspace: Workspace):
             red, green, blue = (int(v) for v in np.median(patch.reshape(-1, 3), axis=0))
             self._json({"color": f"#{red:02x}{green:02x}{blue:02x}"})
 
-        def _export(self, clip: Clip) -> None:
+        def _export(self) -> None:
             payload = self._read_json()
             settings = KeySettings.from_dict(payload.get("settings", {}))
             crf = int(payload.get("crf", DEFAULT_WEBM_CRF))
             if not 4 <= crf <= 63:
                 raise ValueError("WebM quality must be between 4 and 63.")
-            job = workspace.start_job(clip, str(payload.get("format", "webm")), settings, crf,
-                                      bool(payload.get("mirror_loop", False)),
-                                      bool(payload.get("remove_background", True)))
+            raw_segments = payload.get("segments")
+            if not isinstance(raw_segments, list) or not raw_segments:
+                raise ValueError("Add at least one clip to the timeline.")
+            if len(raw_segments) > 500:
+                raise ValueError("Too many segments.")
+            segments: list[Segment] = []
+            clips: list[Clip] = []
+            for item in raw_segments:
+                clip = workspace.clip(self._id(str(item["clip"])))
+                start = float(item.get("start", 0.0))
+                end = float(item.get("end", clip.info.duration))
+                if not 0 <= start < end:
+                    raise ValueError("Each segment needs an end after its start.")
+                clips.append(clip)
+                segments.append(Segment(clip.path, start, end, bool(item.get("reverse", False))))
+            job = workspace.start_job(
+                segments, clips[0].display_name, str(payload.get("format", "webm")), settings, crf,
+                mirror_loop=bool(payload.get("mirror_loop", False)),
+                remove_background=bool(payload.get("remove_background", True)),
+                include_audio=bool(payload.get("include_audio", False)),
+                canvas=Canvas.of(clips[0].info))
             self._json(job.to_dict())
 
         def _send_file(self, job: Job, attachment: bool) -> None:
@@ -352,10 +484,6 @@ def make_handler(workspace: Workspace):
                 raise ValueError("Expected a JSON object.")
             return data
 
-        def _static(self, name: str, content_type: str) -> None:
-            body = resources.files("peak_video_editor").joinpath("static", name).read_bytes()
-            self._send(HTTPStatus.OK, body, content_type, {"Cache-Control": "no-store"})
-
         def _json(self, data: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
             self._send(status, json.dumps(data).encode(), "application/json")
 
@@ -367,6 +495,8 @@ def make_handler(workspace: Workspace):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
             for key, value in (headers or {}).items():
                 self.send_header(key, value)
             self.end_headers()
@@ -375,45 +505,87 @@ def make_handler(workspace: Workspace):
     return Handler
 
 
-def serve(port: int = 8765, open_browser: bool = True, preload: list[Path] | None = None) -> None:
+def remove_stale_workspaces(max_age_hours: float = 12) -> None:
+    """Delete temp folders left by sessions that crashed or were killed."""
+    cutoff = time.time() - max_age_hours * 3600
+    for folder in Path(tempfile.gettempdir()).glob("peak-alphaloop-*"):
+        try:
+            if folder.is_dir() and folder.stat().st_mtime < cutoff:
+                shutil.rmtree(folder, ignore_errors=True)
+        except OSError:
+            pass
+
+
+def serve(port: int = 8765, open_browser: bool = True, preload: list[Path] | None = None,
+          exit_when_closed: bool | None = None) -> None:
+    remove_stale_workspaces()
     workspace = Workspace()
     for path in preload or []:
         workspace.add_clip(path.resolve())
+    token = secrets.token_urlsafe(24)
     server = None
     for candidate in range(port, port + 20):
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", candidate), make_handler(workspace))
+            server = ThreadingHTTPServer(("127.0.0.1", candidate), make_handler(workspace, token))
             break
         except OSError:
             continue
     if server is None:
         raise SystemExit(f"No free port between {port} and {port + 19}.")
     server.daemon_threads = True
-    url = f"http://127.0.0.1:{server.server_address[1]}/"
-    print(f"Peak Video Editor {__version__} running at {url}  (Ctrl+C to quit)")
+    url = f"http://127.0.0.1:{server.server_address[1]}/?token={token}"
+    print(f"Peak Alphaloop {__version__} is running.\n  Open: {url}\n  (Ctrl+C or the Quit "
+          "button to stop)", flush=True)
+    if exit_when_closed is None:
+        exit_when_closed = updater.is_standalone()
+    updater.cleanup_previous_install()
     if open_browser:
         threading.Timer(0.4, webbrowser.open, args=(url,)).start()
+
+    def watchdog() -> None:
+        while not workspace.stop.wait(5):
+            seen = workspace.last_seen
+            if (exit_when_closed and seen is not None and not workspace.busy()
+                    and time.monotonic() - seen > IDLE_SHUTDOWN_SECONDS):
+                print("No browser window open; shutting down.", flush=True)
+                workspace.stop.set()
+        server.shutdown()
+
+    threading.Thread(target=watchdog, name="watchdog", daemon=True).start()
+    for name in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), lambda *_: workspace.stop.set())
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down.")
+        print("\nShutting down.", flush=True)
     finally:
+        workspace.stop.set()
         server.server_close()
         workspace.close()
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="peak-video-editor",
-                                     description="Open the Peak Projections alpha keyer in your browser.")
+    parser = argparse.ArgumentParser(prog="alphaloop",
+                                     description="Open Peak Alphaloop in your browser.")
     parser.add_argument("videos", type=Path, nargs="*", help="Videos to open right away.")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true", help="Do not open a browser window.")
+    parser.add_argument("--no-update-check", action="store_true",
+                        help="Do not check GitHub for a newer release.")
+    parser.add_argument("--self-test", metavar="REPORT", type=Path, nargs="?", const=Path("-"),
+                        help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args(argv)
+    if args.self_test is not None:
+        from . import selftest
+        return selftest.run(None if str(args.self_test) == "-" else args.self_test)
+    if args.no_update_check:
+        os.environ["ALPHALOOP_NO_UPDATE_CHECK"] = "1"
     try:
         serve(args.port, not args.no_browser, args.videos)
     except MediaError as error:
-        print(f"peak-video-editor: {error}")
+        print(f"alphaloop: {error}", file=sys.stderr)
         return 1
     return 0
 

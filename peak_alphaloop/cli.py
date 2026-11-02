@@ -1,4 +1,8 @@
-"""peak-key: key a black or white background to alpha from the command line."""
+"""alphaloop-cli: Peak Alphaloop from the command line.
+
+Remove a background to alpha, trim, reverse, join clips and make mirror loops
+without opening the app.
+"""
 
 from __future__ import annotations
 
@@ -9,14 +13,23 @@ from pathlib import Path
 
 from . import __version__
 from .keying import PRESETS, preset
-from .media import FORMATS, MediaError, default_output_path, export, probe, read_alpha_range
+from .media import (FORMATS, MediaError, Segment, default_output_path, export_timeline, probe,
+                    read_alpha_range)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="peak-key",
-        description="Turn a black, white or colored (green screen) video background into a transparent alpha channel "
-                    "and save it as WebM (VP9) or ProRes 4444.",
+        prog="alphaloop-cli",
+        description="Remove a black, white or green-screen background to transparency, trim, "
+                    "reverse, join clips and make seamless mirror loops. Saves WebM (VP9), "
+                    "ProRes, or MP4.",
+        epilog="Examples:\n"
+               "  alphaloop-cli smoke.mp4                         # black -> transparent WebM\n"
+               "  alphaloop-cli talent.mp4 -b '#2aa34a' -p hard   # green screen\n"
+               "  alphaloop-cli waves.mp4 -n -m                   # just a seamless loop (MP4)\n"
+               "  alphaloop-cli a.mp4 b.mp4 --join -n -o out.mp4  # join two clips\n"
+               "  alphaloop-cli clip.mp4 --start 2 --end 5.5 --reverse -n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("input", type=Path, nargs="+", help="Source video file(s).")
     parser.add_argument("-o", "--output", type=Path,
@@ -44,6 +57,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-m", "--mirror-loop", action="store_true",
                         help="Play forward then backward so the export loops seamlessly "
                              "(about double the length).")
+    parser.add_argument("--start", type=float, default=0.0, metavar="SECONDS",
+                        help="Trim: start each input at this time.")
+    parser.add_argument("--end", type=float, default=None, metavar="SECONDS",
+                        help="Trim: stop each input at this time.")
+    parser.add_argument("--reverse", action="store_true", help="Play the clip(s) backwards.")
+    parser.add_argument("-j", "--join", action="store_true",
+                        help="Join all inputs, in order, into one output (size and frame rate of "
+                             "the first). Without it, each input is exported separately.")
+    parser.add_argument("-a", "--audio", action="store_true",
+                        help="Include audio (dropped by default).")
     parser.add_argument("--crf", type=int, default=30, help="WebM quality, 15 (best) to 50. Default 30.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -54,12 +77,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.format is None:
         args.format = "mp4" if args.no_key else "webm"
     if args.format == "mp4" and not args.no_key:
-        print("peak-key: MP4 cannot hold transparency; use --no-key or choose webm/prores.",
+        print("alphaloop-cli: MP4 cannot hold transparency; use --no-key or choose webm/prores.",
               file=sys.stderr)
         return 2
-    if args.no_key and not args.mirror_loop:
-        print("peak-key: note: --no-key without --mirror-loop just re-encodes the video.",
-              file=sys.stderr)
+    if args.end is not None and args.end <= args.start:
+        print("alphaloop-cli: --end must be after --start.", file=sys.stderr)
+        return 2
     background = args.background.strip().lower()
     try:
         if background in ("black", "white"):
@@ -67,28 +90,36 @@ def main(argv: list[str] | None = None) -> int:
         else:
             settings = preset(args.preset, "color", background)
     except ValueError:
-        print("peak-key: --background must be black, white or a #RRGGBB color.", file=sys.stderr)
+        print("alphaloop-cli: --background must be black, white or a #RRGGBB color.", file=sys.stderr)
         return 2
     overrides = {key: getattr(args, key) for key in
                  ("threshold", "softness", "protect_interior", "unblend", "despill")
                  if getattr(args, key) is not None}
     settings = replace(settings, **overrides).validated()
 
-    if len(args.input) > 1 and args.output is not None and args.output.suffix:
-        print("peak-key: with several inputs, --output must be a folder.", file=sys.stderr)
+    many_outputs = len(args.input) > 1 and not args.join
+    if many_outputs and args.output is not None and args.output.suffix:
+        print("alphaloop-cli: with several inputs, --output must be a folder (or use --join).",
+              file=sys.stderr)
         return 2
 
+    def segment(path: Path) -> Segment:
+        return Segment(path, args.start, args.end, args.reverse)
+
+    jobs = ([(args.input, args.input[0])] if args.join else [([path], path) for path in args.input])
     failures = 0
-    for source in args.input:
-        destination = _destination(source, args.output, args.format, len(args.input) > 1,
+    for sources, name_from in jobs:
+        destination = _destination(name_from, args.output, args.format, many_outputs,
                                    not args.no_key, args.mirror_loop)
         try:
-            info = probe(source)
-            print(f"{source.name}: {info.width}x{info.height} @ {float(info.frame_rate):.3g} fps, "
-                  f"{info.frame_count} frames -> {destination}")
-            export(source, destination, settings, args.format, webm_crf=args.crf,
-                   progress=_progress_printer(), mirror_loop=args.mirror_loop,
-                   remove_background=not args.no_key)
+            info = probe(sources[0])
+            label = " + ".join(path.name for path in sources)
+            print(f"{label}: {info.width}x{info.height} @ {float(info.frame_rate):.3g} fps -> "
+                  f"{destination}")
+            export_timeline([segment(path) for path in sources], destination, settings,
+                            args.format, webm_crf=args.crf, progress=_progress_printer(),
+                            mirror_loop=args.mirror_loop, remove_background=not args.no_key,
+                            include_audio=args.audio)
             if args.no_key:
                 print("\n  done.")
             else:
@@ -96,9 +127,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"\n  done. alpha range in first frame: {low}-{high}")
         except MediaError as error:
             failures += 1
-            print(f"\npeak-key: {source.name}: {error}", file=sys.stderr)
+            print(f"\nalphaloop-cli: {name_from.name}: {error}", file=sys.stderr)
         except KeyboardInterrupt:
-            print("\npeak-key: cancelled.", file=sys.stderr)
+            print("\nalphaloop-cli: cancelled.", file=sys.stderr)
             return 130
     return 1 if failures else 0
 

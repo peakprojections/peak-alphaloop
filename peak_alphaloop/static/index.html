@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peak Alphaloop</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<style>
+  :root {
+    --bg: #0d1016; --panel: #151a23; --panel-2: #1c2330; --line: #283142;
+    --text: #e8ecf3; --muted: #8b97ab; --accent: #4aa8ff; --accent-2: #2f7fd1;
+    --good: #46c28b; --bad: #ff6b6b; --warn: #f2b84b; --radius: 10px;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-size: 14px; }
+  button, input, select { font: inherit; color: inherit; }
+  .app { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: auto 1fr;
+         height: 100vh; height: 100dvh; }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+           border-bottom: 1px solid var(--line); background: var(--panel); min-width: 0; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px; white-space: nowrap; }
+  header h1 span { color: var(--accent); }
+  header .ver { color: var(--muted); font-size: 12px; }
+  header .spacer { flex: 1; }
+  header .projinfo { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden;
+                     text-overflow: ellipsis; min-width: 0; }
+  .hbtn { border: 1px solid var(--line); background: var(--panel-2); border-radius: 7px; padding: 5px 10px;
+          cursor: pointer; font-size: 12.5px; white-space: nowrap; }
+  .hbtn:disabled { opacity: .4; cursor: default; }
+  .hbtn.update { border-color: var(--good); color: var(--good); text-decoration: none; }
+
+  /* stage */
+  .stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 14px 16px; gap: 10px; }
+  .viewbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--line);
+         border-radius: 8px; padding: 2px; }
+  .seg button { border: 0; background: none; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+                color: var(--muted); }
+  .seg button.on { background: var(--accent-2); color: #fff; }
+  .seg button:disabled { opacity: .4; cursor: default; }
+  .label { color: var(--muted); font-size: 12px; }
+  .canvas { flex: 1; min-height: 120px; border-radius: var(--radius); border: 1px solid var(--line);
+            overflow: hidden; position: relative; }
+  .canvas.checker { background-color: #2a2f38;
+    background-image: linear-gradient(45deg, #3a414d 25%, transparent 25%),
+      linear-gradient(-45deg, #3a414d 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #3a414d 75%),
+      linear-gradient(-45deg, transparent 75%, #3a414d 75%);
+    background-size: 24px 24px; background-position: 0 0, 0 12px, 12px -12px, -12px 0; }
+  /* Pin media to the box so it always scales down to fit (intrinsic size would
+     otherwise push a tall video, and its controls, past the bottom edge). */
+  .canvas img, .canvas video { position: absolute; inset: 0; width: 100%; height: 100%;
+                               object-fit: contain; display: block; }
+  .canvas .busy { position: absolute; top: 10px; right: 12px; font-size: 12px; color: var(--muted);
+                  background: rgba(0,0,0,.45); padding: 3px 8px; border-radius: 6px; display: none; }
+  .canvas.loading .busy { display: block; }
+  .drop { position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+          color: var(--muted); padding: 24px; }
+  .drop strong { display: block; color: var(--text); font-size: 18px; margin-bottom: 6px; }
+  .canvas.dragging { outline: 2px dashed var(--accent); outline-offset: -8px; }
+  .canvas.picking, .canvas.picking img { cursor: crosshair; }
+  .pickhint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); font-size: 12px;
+    background: rgba(0,0,0,.6); padding: 4px 10px; border-radius: 6px; display: none; z-index: 2; }
+  .canvas.picking .pickhint { display: block; }
+  .closevid { position: absolute; top: 10px; left: 12px; z-index: 3; }
+
+  .transport { display: flex; align-items: center; gap: 8px; }
+  .transport input[type=range] { flex: 1; }
+  .ibtn { border: 1px solid var(--line); background: var(--panel-2); border-radius: 7px; min-width: 32px;
+          height: 30px; cursor: pointer; font-size: 13px; padding: 0 8px; }
+  .ibtn:disabled { opacity: .4; cursor: default; }
+  .time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 132px; text-align: right;
+          font-size: 12.5px; }
+
+  /* timeline strip */
+  .strip { position: relative; display: flex; gap: 3px; align-items: stretch; height: 74px; padding: 6px;
+           background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+           overflow-x: auto; overflow-y: hidden; }
+  .strip.dragover { outline: 2px dashed var(--accent); outline-offset: -4px; }
+  .block { position: relative; flex: none; min-width: 46px; border-radius: 6px; overflow: hidden;
+           border: 2px solid transparent; background: #222a37 center / cover no-repeat; cursor: pointer;
+           user-select: none; }
+  .block.sel { border-color: var(--accent); }
+  .block .lbl { position: absolute; left: 0; right: 0; bottom: 0; padding: 2px 6px; font-size: 11px;
+                background: linear-gradient(transparent, rgba(0,0,0,.85)); white-space: nowrap;
+                overflow: hidden; text-overflow: ellipsis; }
+  .block .tag { position: absolute; top: 3px; right: 4px; font-size: 10.5px; background: rgba(0,0,0,.7);
+                border-radius: 4px; padding: 0 4px; }
+  .block.dropbefore::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+                              background: var(--accent); }
+  .block.dropafter::after { content: ""; position: absolute; right: 0; top: 0; bottom: 0; width: 3px;
+                            background: var(--accent); }
+  .addblock { flex: none; width: 92px; border: 1px dashed #3a4558; border-radius: 6px; background: none;
+              color: var(--muted); cursor: pointer; font-size: 12px; }
+  .addblock:hover { color: var(--text); border-color: var(--accent); }
+  .playhead { position: absolute; top: 2px; bottom: 2px; width: 2px; background: #fff; pointer-events: none;
+              box-shadow: 0 0 0 1px rgba(0,0,0,.5); z-index: 2; }
+  .striphint { color: var(--muted); font-size: 11.5px; }
+
+  /* side panel */
+  aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 14px 16px;
+          display: flex; flex-direction: column; gap: 16px; }
+  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
+               margin: 0 0 10px; font-weight: 600; display: flex; justify-content: space-between; }
+  section h2 small { text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border-radius: 8px;
+         border: 1px solid var(--line); background: var(--panel-2); padding: 8px 12px; cursor: pointer;
+         text-decoration: none; color: var(--text); }
+  .btn:hover { border-color: #3a4558; }
+  .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #fff; font-weight: 600; }
+  .btn.primary:hover { background: var(--accent); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.wide { width: 100%; }
+  .btn.small { padding: 6px 8px; font-size: 12.5px; }
+  .btn.active { border-color: var(--accent); background: #1d3550; }
+  .btn.danger:hover { border-color: var(--bad); color: var(--bad); }
+  .info { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 8px; }
+  .info.warn { color: var(--warn); }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; min-width: 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .choice { border: 1px solid var(--line); border-radius: 8px; padding: 10px; cursor: pointer;
+            background: var(--panel-2); text-align: left; }
+  .choice.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .choice b { display: block; font-size: 13px; }
+  .choice span { color: var(--muted); font-size: 11.5px; }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px;
+            margin-right: 6px; border: 1px solid #555; }
+  .slider { margin-bottom: 12px; }
+  .slider .top { display: flex; justify-content: space-between; margin-bottom: 4px; }
+  .slider .val { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .slider .hint { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .check { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 10px; cursor: pointer; }
+  .check input { margin-top: 2px; accent-color: var(--accent); }
+  .check span { color: var(--muted); font-size: 11.5px; display: block; }
+  .check.disabled { opacity: .45; cursor: default; }
+  .progress { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin: 10px 0 6px; }
+  .progress div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .status { font-size: 12px; color: var(--muted); min-height: 16px; }
+  .status.err { color: var(--bad); }
+  .status.ok { color: var(--good); }
+  .result { display: none; margin-top: 10px; gap: 8px; flex-direction: column; }
+  .result.show { display: flex; }
+  .hidden { display: none !important; }
+  .switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .switch b { display: block; font-size: 13px; }
+  .switch span { color: var(--muted); font-size: 11.5px; }
+  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .switch .track { flex: none; width: 38px; height: 22px; border-radius: 11px; background: #3a4558;
+    position: relative; transition: background .15s; }
+  .switch .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
+    border-radius: 50%; background: #fff; transition: transform .15s; }
+  .switch input:checked + .track { background: var(--accent-2); }
+  .switch input:checked + .track::after { transform: translateX(16px); }
+  .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .keyonly.off, .cliponly.off { opacity: .35; pointer-events: none; user-select: none; }
+  .keycolor { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .keycolor .pickrow { display: flex; gap: 8px; align-items: center; }
+  .keycolor input[type=color] { width: 44px; height: 36px; padding: 0; border: 1px solid var(--line);
+    border-radius: 8px; background: var(--panel-2); cursor: pointer; }
+  .keycolor input[type=text] { width: 92px; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px; font-family: ui-monospace, monospace; }
+  .keycolor .btn { flex: 1; padding: 8px 10px; }
+  .trim { display: grid; grid-template-columns: auto 1fr; gap: 6px 8px; align-items: center; margin: 8px 0; }
+  .trim label { color: var(--muted); font-size: 12px; }
+  .trim input { width: 100%; background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
+                padding: 6px 8px; font-variant-numeric: tabular-nums; }
+  .clipname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  kbd { font-family: ui-monospace, monospace; font-size: 10.5px; border: 1px solid #3a4558; border-radius: 4px;
+        padding: 0 4px; color: var(--muted); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px;
+           max-width: 520px; padding: 22px 24px; }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  dialog h3 { margin: 0 0 10px; }
+  dialog p { color: #c3cbd8; line-height: 1.55; margin: 0 0 10px; }
+  dialog a { color: var(--accent); }
+  .closed { display: grid; place-items: center; height: 100vh; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <header>
+    <h1>Peak <span>Alphaloop</span></h1><span class="ver" id="version"></span>
+    <button class="hbtn" id="undoBtn" title="Undo (Ctrl+Z)" disabled>↶ Undo</button>
+    <button class="hbtn" id="redoBtn" title="Redo (Ctrl+Shift+Z)" disabled>↷ Redo</button>
+    <span class="spacer"></span>
+    <span class="projinfo" id="projinfo">No clips yet</span>
+    <a class="hbtn update hidden" id="updateBtn" href="#" target="_blank" rel="noopener"></a>
+    <button class="hbtn" id="aboutBtn">About</button>
+    <button class="hbtn hidden" id="quitBtn" title="Close Peak Alphaloop">Quit</button>
+  </header>
+
+  <main class="stage">
+    <div class="viewbar">
+      <div class="seg" id="viewSeg">
+        <button data-view="result" class="on">Result</button>
+        <button data-view="matte">Alpha matte</button>
+        <button data-view="original">Original</button>
+      </div>
+      <span class="label">Show over</span>
+      <div class="seg" id="backdropSeg">
+        <button data-backdrop="checker" class="on">Checker</button>
+        <button data-backdrop="#7a1f2b">Red</button>
+        <button data-backdrop="#1d5f3a">Green</button>
+        <button data-backdrop="#ffffff">White</button>
+        <button data-backdrop="#000000">Black</button>
+      </div>
+    </div>
+
+    <div class="canvas checker" id="canvas">
+      <div class="drop" id="drop">
+        <div><strong>Drop videos here</strong>or use <em>Add clips</em> below.<br>
+          Add several to join them; trim, split, reverse and reorder them on the timeline.</div>
+      </div>
+      <img id="preview" alt="" class="hidden">
+      <video id="playback" class="hidden" controls loop playsinline></video>
+      <button class="btn small closevid hidden" id="closeVid">✕ Back to editing</button>
+      <div class="busy">Updating…</div>
+      <div class="pickhint">Click the background to sample its color · Esc to cancel</div>
+    </div>
+
+    <div class="transport">
+      <button class="ibtn" id="startBtn" title="Go to start (Home)" disabled>⏮</button>
+      <button class="ibtn" id="prevBtn" title="Previous frame (←)" disabled>◀</button>
+      <button class="ibtn" id="nextBtn" title="Next frame (→)" disabled>▶</button>
+      <button class="ibtn" id="endBtn" title="Go to end (End)" disabled>⏭</button>
+      <input type="range" id="time" min="0" max="0" value="0" step="1" disabled aria-label="Playhead">
+      <span class="time" id="timeLabel">0:00.00 / 0:00.00</span>
+    </div>
+
+    <div class="strip" id="strip"></div>
+    <div class="striphint">Drag clips to reorder · click the strip to move the playhead ·
+      <kbd>S</kbd> split · <kbd>R</kbd> reverse · <kbd>D</kbd> duplicate · <kbd>Del</kbd> remove ·
+      <kbd>←</kbd><kbd>→</kbd> step frames</div>
+  </main>
+
+  <aside>
+    <input type="file" id="file" accept="video/*,.mov,.mkv,.webm,.mp4,.avi,.m4v" multiple class="hidden">
+
+    <section class="cliponly off" id="clipSection">
+      <h2>Selected clip <small id="clipIndex"></small></h2>
+      <div class="clipname" id="clipName">—</div>
+      <div class="info" id="clipInfo" style="margin-top:2px"></div>
+      <div class="trim">
+        <label for="inTime">Source in</label><input type="number" id="inTime" min="0" step="0.01">
+        <label for="outTime">Source out</label><input type="number" id="outTime" min="0" step="0.01">
+      </div>
+      <div class="grid2">
+        <button class="btn small" id="trimStartBtn" title="Cut away everything before the playhead in this clip">⇤ Trim start here</button>
+        <button class="btn small" id="trimEndBtn" title="Cut away everything after the playhead in this clip">Trim end here ⇥</button>
+        <button class="btn small" id="splitBtn" title="Split at playhead (S)">✂ Split</button>
+        <button class="btn small" id="reverseBtn" title="Play this clip backwards (R)">⇄ Reverse</button>
+        <button class="btn small" id="dupBtn" title="Duplicate (D)">⧉ Duplicate</button>
+        <button class="btn small danger" id="delBtn" title="Remove from timeline (Delete)">🗑 Remove</button>
+        <button class="btn small" id="leftBtn" title="Move earlier">◀ Move earlier</button>
+        <button class="btn small" id="rightBtn" title="Move later">Move later ▶</button>
+      </div>
+    </section>
+
+    <section>
+      <label class="switch" title="Turn off to just edit, loop or re-encode the video as-is">
+        <div><b>Remove background</b><span id="keyToggleHint">Make the background transparent.</span></div>
+        <input type="checkbox" id="removeBg" checked><i class="track"></i>
+      </label>
+    </section>
+
+    <section class="keyonly">
+      <h2>Background to remove</h2>
+      <div class="row" id="bgSeg">
+        <button class="choice on" data-bg="black"><b><i class="swatch" style="background:#000"></i>Black</b></button>
+        <button class="choice" data-bg="white"><b><i class="swatch" style="background:#fff"></i>White</b></button>
+        <button class="choice" data-bg="color"><b><i class="swatch" id="pickSwatch"></i>Color</b></button>
+      </div>
+      <div class="keycolor hidden" id="keyColorBox">
+        <div class="pickrow">
+          <input type="color" id="keyColor" value="#00b140" title="Choose the background color">
+          <input type="text" id="keyHex" value="#00b140" spellcheck="false" maxlength="7" aria-label="Hex color">
+          <button class="btn" id="pickBtn" title="Click the background in the preview to sample it">Pick from video</button>
+        </div>
+        <div class="info" style="margin-top:0">Click <em>Pick from video</em>, then click the background in the preview.
+          Pick a typical spot, not the brightest or darkest part.</div>
+        <label class="check" style="margin:0"><input type="checkbox" id="despill">
+          <div>Remove color cast<span>Pulls green/blue spill out of hair and skin edges.</span></div></label>
+      </div>
+    </section>
+
+    <section class="keyonly">
+      <h2>Key style</h2>
+      <div class="row" id="presetSeg">
+        <button class="choice on" data-preset="soft"><b>Soft</b><span>Glows, smoke, light, hair</span></button>
+        <button class="choice" data-preset="hard"><b>Hard</b><span>Solid objects, logos, people</span></button>
+      </div>
+    </section>
+
+    <section class="keyonly">
+      <h2>Fine tune</h2>
+      <div class="slider">
+        <div class="top"><label for="threshold">Threshold</label><span class="val" id="thresholdVal"></span></div>
+        <input type="range" id="threshold" min="0" max="0.6" step="0.005">
+        <div class="hint">Raise to remove noise or a not-quite-pure background.</div>
+      </div>
+      <div class="slider">
+        <div class="top"><label for="softness">Softness</label><span class="val" id="softnessVal"></span></div>
+        <input type="range" id="softness" min="0.005" max="1" step="0.005">
+        <div class="hint">High = smooth see-through falloff. Low = crisp cutout.</div>
+      </div>
+      <label class="check"><input type="checkbox" id="unblend">
+        <div>Remove edge fringe<span>Recovers true edge colors so no dark or light halo remains.</span></div></label>
+      <label class="check"><input type="checkbox" id="protect">
+        <div>Protect interior<span>Only remove background touching the frame edge, so parts of the subject that match it stay solid.</span></div></label>
+    </section>
+
+    <section>
+      <h2>Export</h2>
+      <div class="row" id="formatSeg">
+        <button class="choice on" data-format="webm"><b>WebM</b><span id="webmDesc">VP9 + alpha · small files</span></button>
+        <button class="choice" data-format="prores"><b id="proresName">ProRes 4444</b><span>.mov · large, lossless-ish</span></button>
+        <button class="choice hidden" data-format="mp4"><b>MP4</b><span>H.264 · plays anywhere</span></button>
+      </div>
+      <div class="slider" id="crfBox" style="margin-top:12px">
+        <div class="top"><label for="crf">WebM quality</label><span class="val" id="crfVal"></span></div>
+        <input type="range" id="crf" min="15" max="45" step="1">
+        <div class="hint">Lower = better quality and larger file. 30 is a good default.</div>
+      </div>
+      <label class="check" style="margin-top:4px"><input type="checkbox" id="mirrorLoop">
+        <div>Mirror loop<span id="loopHint">Plays forward, then in reverse, so the end flows back into the start.</span></div></label>
+      <label class="check" id="audioRow"><input type="checkbox" id="includeAudio">
+        <div>Include audio<span id="audioHint">Keeps the clips' sound (silence where a clip has none).</span></div></label>
+      <div class="info" id="outInfo" style="margin:0 0 8px"></div>
+      <button class="btn primary wide" id="exportBtn" disabled>Export video</button>
+      <div class="progress"><div id="bar"></div></div>
+      <div class="status" id="status"></div>
+      <div class="result" id="result">
+        <a class="btn wide" id="download" href="#">Download</a>
+        <button class="btn wide" id="playBtn">Play result in preview</button>
+      </div>
+      <button class="btn wide hidden" id="cancelRun" style="margin-top:8px">Cancel export</button>
+    </section>
+  </aside>
+</div>
+
+<dialog id="about">
+  <h3>Peak Alphaloop <span class="ver" id="aboutVersion"></span></h3>
+  <p>A small, free video tool from <a href="https://peakprojections.com" target="_blank" rel="noopener">Peak Projections</a>:
+    remove black, white or green-screen backgrounds to real transparency, make seamless mirror loops,
+    and do basic multi-clip edits.</p>
+  <p>Built together with <b>Claude</b>, Anthropic's AI model, which wrote the code with us.</p>
+  <p>Open source under the MIT License ·
+    <a href="https://github.com/peakprojections/peak-alphaloop" target="_blank" rel="noopener">Source &amp; releases on GitHub</a>.
+    Video processing by <a href="https://ffmpeg.org" target="_blank" rel="noopener">FFmpeg</a>.</p>
+  <p style="color:var(--muted);font-size:12px">Everything runs on your computer. The only network request is an optional
+    check for new releases on GitHub.</p>
+  <div style="text-align:right"><button class="btn" onclick="document.getElementById('about').close()">Close</button></div>
+</dialog>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const state = {
+  clips: {},            // id -> clip info from the server
+  segments: [],         // [{uid, clip, start, end, reverse}]
+  selected: null,       // uid
+  frame: 0,             // playhead, in output frames
+  view: "result", backdrop: "checker", preset: "soft", format: "webm",
+  settings: { background: "black", threshold: 0.03, softness: 0.97, unblend: true, protect_interior: false,
+              key_color: "#00b140", despill: true },
+  presets: {}, colorPresets: {}, crf: 30, job: null, previewToken: 0, picking: false, pickedOnce: false,
+  mirrorLoop: false, removeBg: true, includeAudio: false, undo: [], redo: [], uidSeq: 1,
+};
+
+// ---------------------------------------------------------------- helpers
+async function api(path, options = {}) {
+  const response = await fetch(path, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+function fmtTime(s) {
+  s = Math.max(0, s); const m = Math.floor(s / 60), r = s - m * 60;
+  return `${m}:${r.toFixed(2).padStart(5, "0")}`;
+}
+function fmtBytes(n) {
+  const u = ["B", "KB", "MB", "GB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+function setStatus(text, kind = "") { const el = $("status"); el.textContent = text; el.className = "status " + kind; }
+function selectIn(groupId, attr, value) {
+  for (const b of $(groupId).querySelectorAll(`[data-${attr}]`)) b.classList.toggle("on", b.dataset[attr] === value);
+}
+const typing = () => ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName) &&
+  !["range", "checkbox", "color"].includes(document.activeElement.type);
+
+// ---------------------------------------------------------------- timeline model
+// The output canvas (size and frame rate) comes from the first clip on the timeline.
+function canvasClip() { return state.segments.length ? state.clips[state.segments[0].clip] : null; }
+function fps() { return canvasClip()?.frame_rate || 30; }
+function segFrames(s) { return Math.max(1, Math.round((s.end - s.start) * fps())); }
+function totalFrames() { return state.segments.reduce((n, s) => n + segFrames(s), 0); }
+function segIndex(uid) { return state.segments.findIndex((s) => s.uid === uid); }
+function selectedSeg() { const i = segIndex(state.selected); return i >= 0 ? state.segments[i] : null; }
+function segStartFrame(index) { let n = 0; for (let i = 0; i < index; i++) n += segFrames(state.segments[i]); return n; }
+function locate(frame) {
+  // -> {index, seg, local, n, source}: which clip and which source time is on screen at this frame
+  let acc = 0;
+  for (let i = 0; i < state.segments.length; i++) {
+    const s = state.segments[i], n = segFrames(s);
+    if (frame < acc + n || i === state.segments.length - 1) {
+      const local = Math.min(Math.max(0, frame - acc), n - 1);
+      const forward = s.reverse ? n - 1 - local : local;
+      return { index: i, seg: s, local, n, source: s.start + (forward + 0.02) / fps() };
+    }
+    acc += n;
+  }
+  return null;
+}
+function snapshot() { return JSON.stringify({ segments: state.segments, selected: state.selected }); }
+function commit(mutate) {
+  state.undo.push(snapshot()); if (state.undo.length > 200) state.undo.shift();
+  state.redo = [];
+  mutate();
+  afterEdit();
+}
+function restore(json) {
+  const s = JSON.parse(json); state.segments = s.segments; state.selected = s.selected; afterEdit();
+}
+function undo() { if (!state.undo.length) return; state.redo.push(snapshot()); restore(state.undo.pop()); }
+function redo() { if (!state.redo.length) return; state.undo.push(snapshot()); restore(state.redo.pop()); }
+function afterEdit() {
+  const total = totalFrames();
+  state.frame = Math.min(state.frame, Math.max(0, total - 1));
+  if (!selectedSeg() && state.segments.length) state.selected = locate(state.frame).seg.uid;
+  if (!state.segments.length) state.selected = null;
+  renderStrip(); syncControls(); schedulePreview(0);
+}
+function newSeg(clipId, start, end, reverse = false) {
+  return { uid: state.uidSeq++, clip: clipId, start, end, reverse };
+}
+
+// ---------------------------------------------------------------- editing operations
+function splitAtPlayhead() {
+  const loc = locate(state.frame); if (!loc) return;
+  if (loc.local === 0) { setStatus("The playhead is at the start of the clip; move it inside to split."); return; }
+  const s = loc.seg, f = fps();
+  commit(() => {
+    let a, b;
+    if (!s.reverse) {
+      const cut = s.start + loc.local / f;
+      a = newSeg(s.clip, s.start, cut); b = newSeg(s.clip, cut, s.end);
+    } else {
+      const cut = s.start + (loc.n - loc.local) / f;
+      a = newSeg(s.clip, cut, s.end, true); b = newSeg(s.clip, s.start, cut, true);
+    }
+    state.segments.splice(loc.index, 1, a, b); state.selected = b.uid;
+  });
+}
+function trimHere(which) {
+  const seg = selectedSeg(); const loc = locate(state.frame);
+  if (!seg || !loc || loc.seg.uid !== seg.uid) { setStatus("Move the playhead inside the selected clip first."); return; }
+  const f = fps(), src = seg.start + (seg.reverse ? loc.n - 1 - loc.local : loc.local) / f;
+  commit(() => {
+    // Timeline "start" is the source end when the clip plays reversed.
+    if ((which === "start") !== seg.reverse) seg.start = Math.max(seg.start, Math.min(src, seg.end - 1 / f));
+    else seg.end = Math.min(seg.end, Math.max(src + 1 / f, seg.start + 1 / f));
+    if (which === "start") state.frame = segStartFrame(segIndex(seg.uid));
+  });
+}
+function toggleReverse() { const s = selectedSeg(); if (s) commit(() => { s.reverse = !s.reverse; }); }
+function duplicateSel() {
+  const i = segIndex(state.selected); if (i < 0) return;
+  commit(() => { const s = state.segments[i]; const c = newSeg(s.clip, s.start, s.end, s.reverse);
+    state.segments.splice(i + 1, 0, c); state.selected = c.uid; });
+}
+function removeSel() {
+  const i = segIndex(state.selected); if (i < 0) return;
+  commit(() => { state.segments.splice(i, 1);
+    state.selected = state.segments[Math.min(i, state.segments.length - 1)]?.uid ?? null; });
+}
+function moveSel(delta) {
+  const i = segIndex(state.selected), j = i + delta;
+  if (i < 0 || j < 0 || j >= state.segments.length) return;
+  commit(() => { const [s] = state.segments.splice(i, 1); state.segments.splice(j, 0, s);
+    state.frame = segStartFrame(j); });
+}
+function setTrim(field, value) {
+  const s = selectedSeg(); if (!s || !Number.isFinite(value)) return;
+  const dur = state.clips[s.clip].duration, f = fps();
+  commit(() => {
+    if (field === "start") s.start = Math.min(Math.max(0, value), s.end - 1 / f);
+    else s.end = Math.max(Math.min(dur, value), s.start + 1 / f);
+  });
+}
+
+// ---------------------------------------------------------------- rendering
+function thumbUrl(seg) {
+  const n = segFrames(seg), forward = seg.reverse ? n - 1 : 0;
+  const t = seg.start + (forward + 0.02) / fps();
+  return `/api/clips/${seg.clip}/preview?` + new URLSearchParams({
+    t: t.toFixed(3), view: "plain", w: 192, format: "jpeg", canvas: state.segments[0].clip });
+}
+let dragUid = null;
+function renderStrip() {
+  const strip = $("strip"); strip.innerHTML = "";
+  const total = totalFrames(), width = Math.max(strip.clientWidth - 120, 300);
+  state.segments.forEach((s, i) => {
+    const n = segFrames(s), b = document.createElement("div");
+    b.className = "block" + (s.uid === state.selected ? " sel" : "");
+    b.style.width = `${Math.max(46, (n / total) * width)}px`;
+    b.style.backgroundImage = `url("${thumbUrl(s)}")`;
+    b.draggable = true; b.dataset.uid = s.uid;
+    const clip = state.clips[s.clip];
+    b.title = `${clip.name}\n${fmtTime(s.start)} – ${fmtTime(s.end)} of source${s.reverse ? " · reversed" : ""}`;
+    b.innerHTML = `<span class="lbl"></span>${s.reverse ? '<span class="tag">⇄ rev</span>' : ""}`;
+    b.querySelector(".lbl").textContent = `${i + 1}. ${clip.name} · ${fmtTime(n / fps())}`;
+    b.onclick = (e) => {
+      // Click selects the clip and puts the playhead at that point within it.
+      const r = b.getBoundingClientRect(), frac = Math.min(Math.max((e.clientX - r.left) / r.width, 0), 0.999);
+      state.selected = s.uid; state.frame = segStartFrame(i) + Math.floor(frac * n);
+      renderStrip(); syncControls(); schedulePreview(0);
+    };
+    b.ondragstart = (e) => { dragUid = s.uid; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", s.uid); };
+    b.ondragend = () => { dragUid = null; clearDropMarks(); };
+    b.ondragover = (e) => {
+      if (dragUid === null) return;
+      e.preventDefault(); clearDropMarks();
+      const r = b.getBoundingClientRect(); b.classList.add(e.clientX < r.left + r.width / 2 ? "dropbefore" : "dropafter");
+    };
+    b.ondrop = (e) => {
+      if (dragUid === null) return;
+      e.preventDefault(); e.stopPropagation();
+      const r = b.getBoundingClientRect(), after = e.clientX >= r.left + r.width / 2;
+      const from = segIndex(dragUid); let to = i + (after ? 1 : 0); if (from < to) to--;
+      clearDropMarks(); if (from === to) return;
+      const moving = dragUid;
+      commit(() => { const [m] = state.segments.splice(from, 1); state.segments.splice(to, 0, m);
+        state.selected = moving; state.frame = segStartFrame(to); });
+    };
+    strip.appendChild(b);
+  });
+  const add = document.createElement("button");
+  add.className = "addblock"; add.textContent = state.segments.length ? "＋ Add clips" : "＋ Add clips to start";
+  add.onclick = () => $("file").click();
+  strip.appendChild(add);
+  const head = document.createElement("div"); head.className = "playhead"; head.id = "playhead";
+  strip.appendChild(head); positionPlayhead();
+}
+function clearDropMarks() { for (const el of document.querySelectorAll(".dropbefore,.dropafter")) el.classList.remove("dropbefore", "dropafter"); }
+function positionPlayhead() {
+  const head = $("playhead"), loc = locate(state.frame);
+  if (!head || !loc) { if (head) head.style.display = "none"; return; }
+  const block = $("strip").querySelector(`.block[data-uid="${loc.seg.uid}"]`);
+  if (!block) return;
+  head.style.display = "";
+  head.style.left = `${block.offsetLeft + ((loc.local + 0.5) / loc.n) * block.offsetWidth - 1}px`;
+}
+
+function syncControls() {
+  const s = state.settings, have = state.segments.length > 0, total = totalFrames(), f = fps();
+  // timeline + transport
+  $("time").max = Math.max(0, total - 1); $("time").value = state.frame;
+  for (const id of ["time", "startBtn", "prevBtn", "nextBtn", "endBtn"]) $(id).disabled = !have;
+  $("timeLabel").textContent = `${fmtTime(state.frame / f)} / ${fmtTime(total / f)}`;
+  $("undoBtn").disabled = !state.undo.length; $("redoBtn").disabled = !state.redo.length;
+  const cc = canvasClip();
+  $("projinfo").textContent = have
+    ? `${state.segments.length} clip${state.segments.length > 1 ? "s" : ""} · ${fmtTime(total / f)} · output ${cc.width}×${cc.height} @ ${+f.toFixed(3)} fps`
+    : "No clips yet";
+  positionPlayhead();
+  // selected clip
+  const seg = selectedSeg(), i = segIndex(state.selected);
+  $("clipSection").classList.toggle("off", !seg);
+  if (seg) {
+    const clip = state.clips[seg.clip];
+    $("clipIndex").textContent = `${i + 1} of ${state.segments.length}`;
+    $("clipName").textContent = clip.name;
+    const fitted = cc && (clip.width !== cc.width || clip.height !== cc.height);
+    $("clipInfo").textContent = `${clip.width}×${clip.height} · ${+clip.frame_rate.toFixed(3)} fps · source ${fmtTime(clip.duration)}` +
+      ` · using ${fmtTime(segFrames(seg) / f)}${seg.reverse ? " reversed" : ""}${fitted ? " · fitted to output size" : ""}`;
+    if (document.activeElement !== $("inTime")) $("inTime").value = seg.start.toFixed(2);
+    if (document.activeElement !== $("outTime")) $("outTime").value = seg.end.toFixed(2);
+    $("inTime").max = $("outTime").max = clip.duration.toFixed(3);
+    $("reverseBtn").classList.toggle("active", seg.reverse);
+    $("leftBtn").disabled = i === 0; $("rightBtn").disabled = i === state.segments.length - 1;
+  } else { $("clipIndex").textContent = ""; $("clipName").textContent = "—"; $("clipInfo").textContent = "Add a clip to edit it."; }
+  // keying
+  $("threshold").value = s.threshold; $("thresholdVal").textContent = s.threshold.toFixed(3);
+  $("softness").value = s.softness; $("softnessVal").textContent = s.softness.toFixed(3);
+  $("unblend").checked = s.unblend; $("protect").checked = s.protect_interior;
+  $("despill").checked = s.despill; $("mirrorLoop").checked = state.mirrorLoop;
+  $("keyColorBox").classList.toggle("hidden", s.background !== "color");
+  $("keyColor").value = s.key_color; $("pickSwatch").style.background = s.key_color;
+  if (document.activeElement !== $("keyHex")) $("keyHex").value = s.key_color;
+  $("pickBtn").classList.toggle("active", state.picking);
+  $("pickBtn").textContent = state.picking ? "Click the video…" : "Pick from video";
+  $("canvas").classList.toggle("picking", state.picking);
+  $("crf").value = state.crf; $("crfVal").textContent = state.crf;
+  $("crfBox").classList.toggle("hidden", state.format !== "webm");
+  selectIn("bgSeg", "bg", s.background); selectIn("presetSeg", "preset", state.preset);
+  selectIn("formatSeg", "format", state.format);
+  selectIn("viewSeg", "view", state.removeBg ? state.view : "original");
+  selectIn("backdropSeg", "backdrop", state.backdrop);
+  $("removeBg").checked = state.removeBg;
+  for (const el of document.querySelectorAll(".keyonly")) el.classList.toggle("off", !state.removeBg);
+  for (const b of $("viewSeg").querySelectorAll("button")) b.disabled = !state.removeBg && b.dataset.view !== "original";
+  for (const b of $("backdropSeg").querySelectorAll("button")) b.disabled = !state.removeBg;
+  $("keyToggleHint").textContent = state.removeBg ? "Make the background transparent."
+    : "Off: video is exported as-is (edit, loop or convert only).";
+  $("formatSeg").querySelector('[data-format="mp4"]').classList.toggle("hidden", state.removeBg);
+  $("webmDesc").textContent = state.removeBg ? "VP9 + alpha · small files" : "VP9 · small files";
+  $("proresName").textContent = state.removeBg ? "ProRes 4444" : "ProRes 422 HQ";
+  // export
+  const anyAudio = state.segments.some((x) => state.clips[x.clip].has_audio);
+  $("includeAudio").disabled = !anyAudio; $("audioRow").classList.toggle("disabled", !anyAudio);
+  $("includeAudio").checked = state.includeAudio && anyAudio;
+  $("audioHint").textContent = anyAudio ? "Keeps the clips' sound (silence where a clip has none)."
+                                         : "None of the clips on the timeline have audio.";
+  const outFrames = state.mirrorLoop ? total + Math.max(0, total - 2) : total;
+  $("loopHint").textContent = state.mirrorLoop && have
+    ? `Forward then reverse: ${fmtTime(outFrames / f)} (${outFrames} frames) from ${fmtTime(total / f)}.`
+    : "Plays forward, then in reverse, so the end flows back into the start.";
+  $("outInfo").textContent = have ? `Output: ${cc.width}×${cc.height}, ${+f.toFixed(3)} fps, ${fmtTime(outFrames / f)}` +
+    (state.segments.length > 1 ? " (size and frame rate of the first clip)" : "") : "";
+  $("exportBtn").disabled = !have || !!(state.job && state.job.status === "running");
+  // stage backdrop
+  const canvasEl = $("canvas"), playing = !$("playback").classList.contains("hidden");
+  const showBackdrop = state.removeBg && (state.view === "result" || playing);
+  canvasEl.classList.toggle("checker", showBackdrop && state.backdrop === "checker");
+  canvasEl.style.backgroundColor = showBackdrop && state.backdrop !== "checker" ? state.backdrop : (showBackdrop ? "" : "#0a0c10");
+  $("drop").classList.toggle("hidden", have || playing);
+  if (!have && !playing) $("preview").classList.add("hidden");
+}
+
+// ---------------------------------------------------------------- preview
+let previewTimer = null;
+function schedulePreview(delay = 50) { clearTimeout(previewTimer); previewTimer = setTimeout(updatePreview, delay); }
+async function updatePreview() {
+  const loc = locate(state.frame); if (!loc) return;
+  const token = ++state.previewToken;
+  const view = state.removeBg ? state.view : "plain";
+  const q = new URLSearchParams({ t: loc.source.toFixed(3), view, canvas: state.segments[0].clip,
+    ...Object.fromEntries(Object.entries(state.settings).map(([k, v]) => [k, String(v)])) });
+  $("canvas").classList.add("loading");
+  try {
+    const response = await fetch(`/api/clips/${loc.seg.clip}/preview?${q}`);
+    if (!response.ok) throw new Error((await response.json()).error);
+    const blob = await response.blob();
+    if (token !== state.previewToken) return;
+    const img = $("preview"), old = img.src;
+    img.src = URL.createObjectURL(blob);
+    if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+    showPreviewImage();
+  } catch (e) { if (token === state.previewToken) setStatus(e.message, "err"); }
+  finally { if (token === state.previewToken) $("canvas").classList.remove("loading"); }
+}
+function showPreviewImage() {
+  const video = $("playback");
+  if (!video.classList.contains("hidden")) { video.pause(); video.classList.add("hidden"); $("closeVid").classList.add("hidden"); }
+  $("preview").classList.remove("hidden");
+  syncControls();
+}
+function seek(frame) {
+  const total = totalFrames(); if (!total) return;
+  state.frame = Math.min(Math.max(0, Math.round(frame)), total - 1);
+  const loc = locate(state.frame);
+  if (loc && loc.seg.uid !== state.selected) { state.selected = loc.seg.uid; renderStrip(); }
+  syncControls(); schedulePreview(30);
+}
+
+// ---------------------------------------------------------------- uploads
+async function uploadFiles(files) {
+  files = [...files].filter(Boolean); if (!files.length) return;
+  const added = [];
+  for (const [k, file] of files.entries()) {
+    try { added.push(await uploadOne(file, k + 1, files.length)); }
+    catch (e) { setStatus(`${file.name}: ${e.message}`, "err"); }
+  }
+  $("bar").style.width = "0";
+  if (!added.length) return;
+  const firstNew = state.segments.length;
+  commit(() => {
+    for (const clip of added) { state.clips[clip.id] = clip; state.segments.push(newSeg(clip.id, 0, clip.duration)); }
+    state.selected = state.segments[firstNew].uid; state.frame = segStartFrame(firstNew);
+  });
+  setStatus(`Added ${added.length} clip${added.length > 1 ? "s" : ""}.`);
+}
+function uploadOne(file, n, of) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", "/api/upload");
+    xhr.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) {
+      $("bar").style.width = `${(e.loaded / e.total) * 100}%`;
+      setStatus(`Loading ${file.name}${of > 1 ? ` (${n}/${of})` : ""}… ${Math.round(e.loaded / e.total * 100)}%`); } };
+    xhr.onload = () => { let data = {}; try { data = JSON.parse(xhr.responseText); } catch {}
+      xhr.status === 200 ? resolve(data) : reject(new Error(data.error || "Could not open that file.")); };
+    xhr.onerror = () => reject(new Error("Upload failed."));
+    xhr.send(file);
+  });
+}
+
+// ---------------------------------------------------------------- export
+async function startExport() {
+  if (!state.segments.length) return;
+  $("exportBtn").disabled = true; $("result").classList.remove("show"); $("cancelRun").classList.remove("hidden");
+  setStatus("Starting export…");
+  try {
+    const job = await api("/api/export", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ format: state.format, settings: state.settings, crf: state.crf,
+        mirror_loop: state.mirrorLoop, remove_background: state.removeBg,
+        include_audio: state.includeAudio && !$("includeAudio").disabled,
+        segments: state.segments.map(({ clip, start, end, reverse }) => ({ clip, start, end, reverse })) }),
+    });
+    state.job = job; pollJob();
+  } catch (e) { finishRun(); setStatus(e.message, "err"); }
+}
+async function pollJob() {
+  if (!state.job) return;
+  try {
+    const job = await api(`/api/jobs/${state.job.id}`);
+    state.job = job;
+    $("bar").style.width = `${job.total ? Math.min(100, (job.done / job.total) * 100) : 0}%`;
+    if (job.status === "running") {
+      const rate = job.elapsed > 0 ? job.done / job.elapsed : 0;
+      const eta = rate > 0 ? Math.max(0, (job.total - job.done) / rate) : null;
+      setStatus(`Exporting ${job.done}/${job.total} frames` + (eta !== null ? ` · ~${Math.ceil(eta)}s left` : ""));
+      setTimeout(pollJob, 400); return;
+    }
+    finishRun();
+    if (job.status === "done") {
+      setStatus(`Done in ${job.elapsed}s · ${job.filename} · ${fmtBytes(job.size)}`, "ok");
+      $("download").href = job.download; $("download").setAttribute("download", job.filename);
+      $("playBtn").classList.toggle("hidden", job.format === "prores");
+      $("result").classList.add("show");
+    } else if (job.status === "cancelled") { setStatus("Export cancelled."); $("bar").style.width = "0"; }
+    else setStatus(job.error || "Export failed.", "err");
+  } catch (e) { finishRun(); setStatus(e.message, "err"); }
+}
+function finishRun() { $("cancelRun").classList.add("hidden"); syncControls(); }
+function playResult() {
+  if (!state.job || state.job.format === "prores") return;
+  const video = $("playback");
+  video.src = `${state.job.stream}?v=${state.job.id}`;
+  $("preview").classList.add("hidden"); video.classList.remove("hidden"); $("closeVid").classList.remove("hidden");
+  state.view = "result"; syncControls(); video.play().catch(() => {});
+}
+
+// ---------------------------------------------------------------- wiring
+$("file").onchange = (e) => { uploadFiles(e.target.files); e.target.value = ""; };
+for (const el of [$("canvas"), $("strip")]) {
+  el.addEventListener("dragover", (e) => { if (dragUid !== null) return; e.preventDefault(); el.classList.add(el.id === "canvas" ? "dragging" : "dragover"); });
+  el.addEventListener("dragleave", () => el.classList.remove("dragging", "dragover"));
+  el.addEventListener("drop", (e) => { if (dragUid !== null) return; e.preventDefault(); el.classList.remove("dragging", "dragover");
+    uploadFiles(e.dataTransfer.files); });
+}
+$("time").oninput = (e) => seek(Number(e.target.value));
+$("startBtn").onclick = () => seek(0);
+$("endBtn").onclick = () => seek(totalFrames() - 1);
+$("prevBtn").onclick = () => seek(state.frame - 1);
+$("nextBtn").onclick = () => seek(state.frame + 1);
+$("splitBtn").onclick = splitAtPlayhead;
+$("trimStartBtn").onclick = () => trimHere("start");
+$("trimEndBtn").onclick = () => trimHere("end");
+$("reverseBtn").onclick = toggleReverse;
+$("dupBtn").onclick = duplicateSel;
+$("delBtn").onclick = removeSel;
+$("leftBtn").onclick = () => moveSel(-1);
+$("rightBtn").onclick = () => moveSel(1);
+$("inTime").onchange = (e) => setTrim("start", parseFloat(e.target.value));
+$("outTime").onchange = (e) => setTrim("end", parseFloat(e.target.value));
+$("undoBtn").onclick = undo; $("redoBtn").onclick = redo;
+$("closeVid").onclick = () => { showPreviewImage(); schedulePreview(0); };
+
+$("viewSeg").onclick = (e) => { const v = e.target.closest("[data-view]"); if (!v || v.disabled) return;
+  state.view = v.dataset.view; syncControls(); schedulePreview(0); };
+$("backdropSeg").onclick = (e) => { const b = e.target.closest("[data-backdrop]"); if (!b || b.disabled) return;
+  state.backdrop = b.dataset.backdrop; syncControls(); };
+function applyPreset() {
+  const table = state.settings.background === "color" ? state.colorPresets : state.presets;
+  const { background, key_color, ...values } = table[state.preset];
+  Object.assign(state.settings, values);
+}
+$("bgSeg").onclick = (e) => { const b = e.target.closest("[data-bg]"); if (!b) return;
+  const wasColor = state.settings.background === "color";
+  state.settings.background = b.dataset.bg;
+  if (wasColor !== (b.dataset.bg === "color")) applyPreset();
+  if (b.dataset.bg === "color" && !state.pickedOnce && state.segments.length) state.picking = true;
+  if (b.dataset.bg !== "color") state.picking = false;
+  syncControls(); schedulePreview(0); };
+$("presetSeg").onclick = (e) => { const p = e.target.closest("[data-preset]"); if (!p) return;
+  state.preset = p.dataset.preset; applyPreset(); syncControls(); schedulePreview(0); };
+$("formatSeg").onclick = (e) => { const f = e.target.closest("[data-format]"); if (!f) return;
+  state.format = f.dataset.format; syncControls(); };
+for (const id of ["threshold", "softness"]) $(id).oninput = (e) => {
+  state.settings[id] = Number(e.target.value); syncControls(); schedulePreview(); };
+$("unblend").onchange = (e) => { state.settings.unblend = e.target.checked; schedulePreview(0); };
+$("protect").onchange = (e) => { state.settings.protect_interior = e.target.checked; schedulePreview(0); };
+$("despill").onchange = (e) => { state.settings.despill = e.target.checked; schedulePreview(0); };
+$("crf").oninput = (e) => { state.crf = Number(e.target.value); syncControls(); };
+$("mirrorLoop").onchange = (e) => { state.mirrorLoop = e.target.checked; syncControls(); };
+$("includeAudio").onchange = (e) => { state.includeAudio = e.target.checked; syncControls(); };
+$("removeBg").onchange = (e) => {
+  state.removeBg = e.target.checked;
+  if (state.removeBg && state.format === "mp4") state.format = "webm";
+  if (!state.removeBg) state.picking = false;
+  syncControls(); schedulePreview(0);
+};
+function setKeyColor(hex) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return false;
+  state.settings.key_color = hex.toLowerCase(); syncControls(); schedulePreview(0); return true;
+}
+$("keyColor").oninput = (e) => { state.pickedOnce = true; setKeyColor(e.target.value); };
+$("keyHex").oninput = (e) => { const v = e.target.value.trim(); if (setKeyColor(v.startsWith("#") ? v : "#" + v)) state.pickedOnce = true; };
+$("keyHex").onblur = () => syncControls();
+$("pickBtn").onclick = () => { if (!state.segments.length) return; state.picking = !state.picking; syncControls(); };
+$("preview").addEventListener("click", async (e) => {
+  if (!state.picking) return;
+  const loc = locate(state.frame); if (!loc) return;
+  // The image is letterboxed (object-fit: contain); map the click into the picture itself.
+  const img = e.target, box = img.getBoundingClientRect();
+  const scale = Math.min(box.width / img.naturalWidth, box.height / img.naturalHeight);
+  const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
+  const left = box.left + (box.width - w) / 2, top = box.top + (box.height - h) / 2;
+  const x = (e.clientX - left) / w, y = (e.clientY - top) / h;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return;
+  try {
+    const { color } = await api(`/api/clips/${loc.seg.clip}/sample?` + new URLSearchParams({
+      t: loc.source.toFixed(3), x: x.toFixed(4), y: y.toFixed(4), canvas: state.segments[0].clip }));
+    state.picking = false; state.pickedOnce = true; state.settings.background = "color";
+    setKeyColor(color); setStatus(`Background color set to ${color}.`);
+  } catch (err) { setStatus(err.message, "err"); }
+});
+$("exportBtn").onclick = startExport;
+$("cancelRun").onclick = () => state.job && api(`/api/jobs/${state.job.id}/cancel`, { method: "POST" });
+$("playBtn").onclick = playResult;
+$("aboutBtn").onclick = () => $("about").showModal();
+$("quitBtn").onclick = async () => {
+  if (state.job?.status === "running" && !confirm("An export is still running. Quit anyway?")) return;
+  try { await api("/api/quit", { method: "POST" }); } catch {}
+  document.body.innerHTML = '<div class="closed"><div><h2>Peak Alphaloop has closed.</h2><p>You can close this tab.</p></div></div>';
+};
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && state.picking) { state.picking = false; syncControls(); return; }
+  if (typing() || $("about").open) return;
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if (mod && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); return; }
+  if (mod || e.altKey || !state.segments.length) return;
+  const step = e.shiftKey ? Math.round(fps()) : 1;
+  const keys = {
+    ArrowLeft: () => seek(state.frame - step), ArrowRight: () => seek(state.frame + step),
+    Home: () => seek(0), End: () => seek(totalFrames() - 1),
+    s: splitAtPlayhead, S: splitAtPlayhead, r: toggleReverse, R: toggleReverse,
+    d: duplicateSel, D: duplicateSel, Delete: removeSel, Backspace: removeSel,
+  };
+  if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
+});
+window.addEventListener("resize", () => renderStrip());
+
+// Keep the local app alive while this tab is open (standalone builds close when no tab is left).
+setInterval(() => fetch("/api/ping", { method: "POST" }).catch(() => {}), 20000);
+
+async function checkForUpdate() {
+  try {
+    const u = await api("/api/update");
+    if (!u.available) return;
+    const btn = $("updateBtn");
+    btn.classList.remove("hidden");
+    if (u.can_install) {
+      btn.textContent = `Update to ${u.latest}`; btn.href = "#"; btn.removeAttribute("target");
+      btn.onclick = async (e) => {
+        e.preventDefault();
+        if (!confirm(`Download and install Peak Alphaloop ${u.latest}? The app will restart.`)) return;
+        btn.textContent = "Updating…";
+        try { const r = await api("/api/update/install", { method: "POST" });
+          document.body.innerHTML = `<div class="closed"><div><h2>${r.message}</h2><p>A new window will open. You can close this tab.</p></div></div>`;
+        } catch (err) { btn.textContent = "Update failed"; alert(err.message); }
+      };
+    } else {
+      btn.textContent = `${u.latest} available`; btn.href = u.asset?.url || u.page;
+      btn.title = "Download the new version from GitHub";
+    }
+  } catch {}
+}
+
+(async () => {
+  const config = await api("/api/config");
+  $("version").textContent = `v${config.version}`; $("aboutVersion").textContent = `v${config.version}`;
+  $("quitBtn").classList.toggle("hidden", !config.standalone);
+  state.presets = config.presets; state.colorPresets = config.color_presets; state.crf = config.default_crf;
+  const { background, key_color, ...soft } = config.presets.soft; Object.assign(state.settings, soft);
+  for (const clip of config.clips) { state.clips[clip.id] = clip; state.segments.push(newSeg(clip.id, 0, clip.duration)); }
+  if (state.segments.length) state.selected = state.segments[0].uid;
+  renderStrip(); syncControls(); schedulePreview(0);
+  setTimeout(checkForUpdate, 1500);
+})();
+</script>
+</body>
+</html>

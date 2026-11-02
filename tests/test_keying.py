@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from peak_video_editor.keying import KeySettings, key_frame, preset
+from peak_alphaloop.keying import KeySettings, key_frame, preset
 
 
 def reference_key(rgb: np.ndarray, settings: KeySettings) -> np.ndarray:

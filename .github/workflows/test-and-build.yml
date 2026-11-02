@@ -39,7 +39,7 @@ jobs:
       - name: Upload release packages
         uses: actions/upload-artifact@v4
         with:
-          name: peak-video-editor-packages
+          name: peak-alphaloop-packages
           path: dist/*
           if-no-files-found: error
 
