@@ -98,7 +98,7 @@ def _bundled_dirs() -> list[Path]:
     dirs: list[Path] = []
     frozen_root = getattr(sys, "_MEIPASS", None)
     if frozen_root:
-        dirs.append(Path(frozen_root) / "ffmpeg")
+        dirs += [Path(frozen_root) / "ffmpeg", Path(frozen_root) / "ffmpeg" / "bin"]
     if getattr(sys, "frozen", False):
         executable_dir = Path(sys.executable).resolve().parent
         dirs += [executable_dir / "ffmpeg", executable_dir.parent / "Resources" / "ffmpeg"]

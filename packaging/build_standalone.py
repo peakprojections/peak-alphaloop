@@ -37,7 +37,6 @@ sys.path.insert(0, str(ROOT))
 from peak_alphaloop import __version__ as VERSION  # noqa: E402
 from peak_alphaloop.updater import ASSET_SUFFIXES  # noqa: E402
 
-GPL_URL = "https://www.gnu.org/licenses/gpl-3.0.txt"
 MAC_FFMPEG = "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/{}.zip"
 
 
@@ -111,16 +110,25 @@ def fetch_ffmpeg(key: str, target: Path) -> None:
             with zipfile.ZipFile(archive) as bundle:
                 bundle.extractall(work / "x")
         else:
-            archive = download(btbn_asset("linux64", ""), work / "ffmpeg.tar.xz")
+            # Shared build: bin/ffmpeg + bin/ffprobe find lib/*.so via RUNPATH $ORIGIN/../lib.
+            archive = download(btbn_asset("linux64", "-shared"), work / "ffmpeg.tar.xz")
             with tarfile.open(archive) as bundle:
                 bundle.extractall(work / "x")
         bin_dir = next(path for path in (work / "x").rglob("bin") if path.is_dir())
-        for item in bin_dir.iterdir():
-            if item.is_file() and (item.suffix.lower() in {".exe", ".dll"} or key == "linux"):
-                if item.stem in {"ffplay"}:
-                    continue
-                shutil.copy2(item, target / item.name)
-                (target / item.name).chmod(0o755)
+        if key == "windows":
+            for item in bin_dir.iterdir():
+                if item.is_file() and item.suffix.lower() in {".exe", ".dll"} and item.stem != "ffplay":
+                    shutil.copy2(item, target / item.name)
+            return
+        (target / "bin").mkdir()
+        (target / "lib").mkdir()
+        for name in ("ffmpeg", "ffprobe"):
+            shutil.copy2(bin_dir / name, target / "bin" / name)
+            (target / "bin" / name).chmod(0o755)
+        # Only the SONAME files (libfoo.so.61); the other names are just symlinks to them.
+        for item in (bin_dir.parent / "lib").iterdir():
+            if re.search(r"\.so\.\d+$", item.name):
+                shutil.copy2(item, target / "lib" / item.name)
 
 
 def copy_local_ffmpeg(source: Path, target: Path) -> None:
@@ -136,11 +144,10 @@ def write_licenses(ffmpeg_dir: Path, target: Path, gpl_text: Path | None) -> Non
     target.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / "LICENSE", target / "LICENSE.txt")
     shutil.copy2(ROOT / "packaging" / "THIRD_PARTY_NOTICES.md", target / "THIRD_PARTY_NOTICES.md")
-    if gpl_text and gpl_text.is_file():
-        shutil.copy2(gpl_text, target / "GPL-3.0.txt")
-    else:
-        download(GPL_URL, target / "GPL-3.0.txt")
-    ffmpeg = next(path for path in ffmpeg_dir.iterdir() if path.stem == "ffmpeg")
+    # The official text ships in the repo (gnu.org is unreliable from CI runners).
+    shutil.copy2(gpl_text if gpl_text and gpl_text.is_file() else ROOT / "packaging" / "GPL-3.0.txt",
+                 target / "GPL-3.0.txt")
+    ffmpeg = next(path for path in ffmpeg_dir.rglob("*") if path.stem == "ffmpeg" and path.is_file())
     version = subprocess.run([str(ffmpeg), "-hide_banner", "-version"], capture_output=True,
                              text=True, check=True).stdout
     license_text = subprocess.run([str(ffmpeg), "-hide_banner", "-L"], capture_output=True,
@@ -161,8 +168,9 @@ def pyinstaller(key: str, ffmpeg_dir: Path, licenses: Path, icons: Path) -> Path
                "--add-data", f"{licenses}{sep}licenses"]
     for module in ("tkinter", "matplotlib", "IPython", "pytest", "PyQt5", "PySide6"):
         command += ["--exclude-module", module]
-    for item in sorted(ffmpeg_dir.iterdir()):
-        command += ["--add-binary", f"{item}{sep}ffmpeg"]
+    for item in sorted(path for path in ffmpeg_dir.rglob("*") if path.is_file()):
+        folder = Path("ffmpeg") / item.parent.relative_to(ffmpeg_dir)
+        command += ["--add-binary", f"{item}{sep}{folder.as_posix()}"]
     if key == "windows":
         command += ["--windowed", "--icon", icons / "icon.ico"]
     elif key == "macos":
