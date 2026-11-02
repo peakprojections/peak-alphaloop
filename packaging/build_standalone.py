@@ -168,9 +168,13 @@ def pyinstaller(key: str, ffmpeg_dir: Path, licenses: Path, icons: Path) -> Path
                "--add-data", f"{licenses}{sep}licenses"]
     for module in ("tkinter", "matplotlib", "IPython", "pytest", "PyQt5", "PySide6"):
         command += ["--exclude-module", module]
+    # FFmpeg is a separate program, not a Python extension. On Windows/Linux add it as
+    # plain files so PyInstaller doesn't copy its shared libraries a second time; macOS
+    # needs it treated as a binary so it is placed and signed correctly in the .app.
+    kind = "--add-binary" if key == "macos" else "--add-data"
     for item in sorted(path for path in ffmpeg_dir.rglob("*") if path.is_file()):
         folder = Path("ffmpeg") / item.parent.relative_to(ffmpeg_dir)
-        command += ["--add-binary", f"{item}{sep}{folder.as_posix()}"]
+        command += [kind, f"{item}{sep}{folder.as_posix()}"]
     if key == "windows":
         command += ["--windowed", "--icon", icons / "icon.ico"]
     elif key == "macos":
@@ -178,7 +182,11 @@ def pyinstaller(key: str, ffmpeg_dir: Path, licenses: Path, icons: Path) -> Path
                     "--osx-bundle-identifier", "com.peakprojections.alphaloop"]
     command.append(ROOT / "packaging" / "alphaloop_main.py")
     run(command)
-    return BUILD / "dist" / (f"{APP}.app" if key == "macos" else APP)
+    built = BUILD / "dist" / (f"{APP}.app" if key == "macos" else APP)
+    if key == "linux":
+        for binary in built.rglob("ffmpeg/bin/*"):
+            binary.chmod(0o755)
+    return built
 
 
 def finish_macos(app: Path) -> Path:
