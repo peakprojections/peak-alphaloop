@@ -61,7 +61,7 @@ Get the file for your system from the
 | --- | --- | --- |
 | Windows 10/11 (64-bit) | `PeakAlphaloop-<version>-windows-x64-setup.exe` | Installs for your user only; no admin rights needed. |
 | macOS (Apple silicon: M1 and newer) | `PeakAlphaloop-<version>-macos-arm64.zip` | Unzip and drag **Peak Alphaloop** to Applications. |
-| macOS (Intel) | `PeakAlphaloop-<version>-macos-x64.zip` | Same as above. Not sure which you have? ** → About This Mac** says "Chip: Apple M…" or "Processor: Intel…". |
+| macOS (Intel), macOS 11 Big Sur or newer | `PeakAlphaloop-<version>-macos-x64.zip` | Same as above. Not sure which you have? ** → About This Mac** says "Chip: Apple M…" or "Processor: Intel…". |
 | Linux (x86-64) | `PeakAlphaloop-<version>-linux-x64.tar.xz` | Extract, then run `PeakAlphaloop` (or `install-desktop-entry.sh` to add it to your menu). |
 
 FFmpeg is included; there is nothing else to install.
