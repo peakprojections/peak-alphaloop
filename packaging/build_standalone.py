@@ -7,7 +7,7 @@ Produces one file in ``release/``:
 
     PeakAlphaloop-<version>-windows-x64-setup.exe   (per-user installer)
     PeakAlphaloop-<version>-macos-arm64.zip         (Peak Alphaloop.app)
-    PeakAlphaloop-<version>-linux-x64.tar.gz        (folder with the app)
+    PeakAlphaloop-<version>-linux-x64.tar.xz        (folder with the app)
 
 and finishes by running the built app's ``--self-test``.
 """
@@ -244,7 +244,7 @@ def package(key: str, built: Path, icons: Path) -> Path:
         launcher = built / "install-desktop-entry.sh"
         launcher.write_text(LINUX_DESKTOP_SCRIPT, encoding="utf-8")
         launcher.chmod(0o755)
-        with tarfile.open(output, "w:gz") as archive:
+        with tarfile.open(output, "w:xz", preset=9) as archive:
             archive.add(built, arcname=APP)
     log(f"Built {output} ({output.stat().st_size / 1e6:.1f} MB)")
     return output

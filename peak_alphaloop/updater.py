@@ -36,7 +36,7 @@ CHECKSUMS_NAME = "SHA256SUMS.txt"
 ASSET_SUFFIXES = {
     "windows": "windows-x64-setup.exe",
     "macos": "macos-arm64.zip",
-    "linux": "linux-x64.tar.gz",
+    "linux": "linux-x64.tar.xz",
 }
 CACHE_SECONDS = 6 * 3600
 TIMEOUT = 8

@@ -14,7 +14,7 @@ def release(tag: str, names: list[str]) -> bytes:
 
 
 ASSETS = ["PeakAlphaloop-9.0.0-windows-x64-setup.exe", "PeakAlphaloop-9.0.0-macos-arm64.zip",
-          "PeakAlphaloop-9.0.0-linux-x64.tar.gz", "SHA256SUMS.txt"]
+          "PeakAlphaloop-9.0.0-linux-x64.tar.xz", "SHA256SUMS.txt"]
 
 
 class UpdaterTests(unittest.TestCase):

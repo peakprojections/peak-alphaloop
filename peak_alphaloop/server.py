@@ -576,7 +576,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--self-test", metavar="REPORT", type=Path, nargs="?", const=Path("-"),
                         help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    args = parser.parse_args(argv)
+    args, unknown = parser.parse_known_args(argv)
+    # macOS Finder can pass a "-psn_0_12345" process serial number; ignore it.
+    unknown = [item for item in unknown if not item.startswith("-psn_")]
+    if unknown:
+        parser.error(f"unrecognized arguments: {' '.join(unknown)}")
     if args.self_test is not None:
         from . import selftest
         return selftest.run(None if str(args.self_test) == "-" else args.self_test)
