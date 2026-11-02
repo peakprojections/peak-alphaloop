@@ -196,11 +196,11 @@ python -m unittest discover -s tests -v       # needs ffmpeg/ffprobe on PATH
 python packaging/build_standalone.py          # standalone build for this OS
 ```
 
-Releases are built by GitHub Actions: pushing a tag `vX.Y.Z` that matches
-`peak_alphaloop/__init__.py` builds every platform (Windows, macOS Apple silicon,
+Releases are built by GitHub Actions: publishing a GitHub Release whose tag `vX.Y.Z`
+matches `peak_alphaloop/__init__.py` builds every platform (Windows, macOS Apple silicon,
 macOS Intel, Linux), runs a self-test of each
 packaged app (real keying, looping and audio exports with the bundled FFmpeg),
-and publishes the release with `SHA256SUMS.txt`.
+and attaches the downloads and `SHA256SUMS.txt` to the release (about 20 minutes).
 
 ## Credits and license
 
