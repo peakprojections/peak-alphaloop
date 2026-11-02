@@ -39,12 +39,11 @@ from peak_alphaloop import __version__ as VERSION  # noqa: E402
 from peak_alphaloop.updater import ASSET_SUFFIXES  # noqa: E402
 
 MAC_FFMPEG = "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/{}.zip"
-# Martin Riedl no longer builds for Intel; evermeet.cx does, with OSXExperts as a fallback.
+# Martin Riedl no longer builds for Intel and evermeet.cx has shut down; OSXExperts
+# publishes Intel builds per FFmpeg version (bump the version here when a new one ships).
 INTEL_MAC_FFMPEG = {
-    "ffmpeg": ["https://evermeet.cx/ffmpeg/getrelease/zip",
-               "https://www.osxexperts.net/ffmpeg80intel.zip"],
-    "ffprobe": ["https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip",
-                "https://www.osxexperts.net/ffprobe80intel.zip"],
+    "ffmpeg": ["https://www.osxexperts.net/ffmpeg80intel.zip"],
+    "ffprobe": ["https://www.osxexperts.net/ffprobe80intel.zip"],
 }
 
 
@@ -226,7 +225,8 @@ def finish_macos(app: Path) -> Path:
     app.rename(final)
     run(["codesign", "--force", "--deep", "--sign", "-", final])
     # Record the oldest macOS the bundled pieces support (for the README/release notes).
-    for binary in (final / "Contents" / "MacOS" / APP, *sorted((final / "Contents" / "Frameworks").rglob("ffmpeg"))[:1]):
+    bundled = [path for path in (final / "Contents" / "Frameworks").rglob("ffmpeg") if path.is_file()]
+    for binary in (final / "Contents" / "MacOS" / APP, *bundled[:1]):
         if binary.is_file():
             loads = subprocess.run(["otool", "-l", str(binary)], capture_output=True, text=True).stdout
             found = (re.findall(r"minos (\d+(?:\.\d+)*)", loads)
