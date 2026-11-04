@@ -20,10 +20,12 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import sys
 import tempfile
 import threading
 import time
+import urllib.request
 import uuid
 import webbrowser
 from collections import OrderedDict
@@ -49,6 +51,8 @@ UPLOAD_CHUNK = 1024 * 1024
 ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 # A standalone app with no browser tab left open shuts itself down after this.
 IDLE_SHUTDOWN_SECONDS = 150
+# ...and one whose browser tab never connected at all gives up after this.
+NEVER_CONNECTED_SECONDS = 600
 
 
 @dataclass
@@ -327,7 +331,7 @@ def make_handler(workspace: Workspace, token: str | None = None):
             supplied = query.get("token")
             if token is not None and supplied is not None:
                 if not hmac.compare_digest(supplied, token):
-                    return self._error(HTTPStatus.FORBIDDEN, "Invalid session link.")
+                    return self._stale_page()
                 # Swap the one-time URL token for a cookie and drop it from the address bar.
                 self.send_response(HTTPStatus.SEE_OTHER)
                 self.send_header("Set-Cookie", f"{self._cookie_name}={token}; Path=/; "
@@ -337,14 +341,20 @@ def make_handler(workspace: Workspace, token: str | None = None):
                 self.end_headers()
                 return None
             if not self._session_ok():
-                body = ("<!DOCTYPE html><meta charset=utf-8><title>Peak Alphaloop</title>"
-                        "<body style='font-family:system-ui;background:#0d1016;color:#e8ecf3;"
-                        "padding:40px'><h1>Peak Alphaloop</h1><p>This session link is no longer "
-                        "valid. Start Peak Alphaloop again, or use the link it printed when it "
-                        "started.</p></body>").encode()
-                return self._send(HTTPStatus.FORBIDDEN, body, "text/html; charset=utf-8")
+                return self._stale_page()
             body = resources.files("peak_alphaloop").joinpath("static", "index.html").read_bytes()
             self._send(HTTPStatus.OK, body, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+
+        def _stale_page(self) -> None:
+            body = ("<!DOCTYPE html><meta charset=utf-8><title>Peak Alphaloop</title>"
+                    "<link rel=icon href=/favicon.png>"
+                    "<body style='font-family:system-ui,sans-serif;background:#0d1016;color:#e8ecf3;"
+                    "display:grid;place-items:center;height:90vh;margin:0'><div style='max-width:460px'>"
+                    "<h2>This Peak Alphaloop link has expired</h2><p style='color:#a9b3c4;"
+                    "line-height:1.5'>It belongs to a session that is no longer running. Close "
+                    "this tab and open Peak Alphaloop again; it will open a fresh tab.</p>"
+                    "</div></body>").encode()
+            self._send(HTTPStatus.FORBIDDEN, body, "text/html; charset=utf-8")
 
         def _upload(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
@@ -505,6 +515,63 @@ def make_handler(workspace: Workspace, token: str | None = None):
     return Handler
 
 
+class LocalServer(ThreadingHTTPServer):
+    """HTTP server that owns its port exclusively.
+
+    Python's default SO_REUSEADDR lets two processes listen on the same port on
+    Windows, so a second copy of the app would silently share the first one's
+    port and hand out links the first copy rejects.
+    """
+
+    daemon_threads = True
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self) -> None:
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if os.name == "nt" and exclusive is not None:
+            self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+        super().server_bind()
+
+
+def state_dir() -> Path:
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        return base / "Peak Alphaloop"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Peak Alphaloop"
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "peak-alphaloop"
+
+
+def instance_file() -> Path:
+    return state_dir() / "instance.json"
+
+
+def _instance_request(info: dict[str, Any], path: str, method: str = "GET") -> dict[str, Any] | None:
+    port, session = int(info["port"]), str(info["token"])
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", method=method, data=b"" if method == "POST" else None,
+        headers={"Cookie": f"alphaloop_{port}={session}"})
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=3) as response:
+            return json.loads(response.read() or b"{}")
+    except (OSError, ValueError):
+        return None
+
+
+def find_running_instance() -> dict[str, Any] | None:
+    """The already-running copy of the app (if any) and whether it is this version."""
+    try:
+        info = json.loads(instance_file().read_text(encoding="utf-8"))
+        info["port"], info["token"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    config = _instance_request(info, "/api/config")
+    if config is None:
+        return None
+    info["version"] = config.get("version")
+    return info
+
+
 def remove_stale_workspaces(max_age_hours: float = 12) -> None:
     """Delete temp folders left by sessions that crashed or were killed."""
     cutoff = time.time() - max_age_hours * 3600
@@ -517,7 +584,23 @@ def remove_stale_workspaces(max_age_hours: float = 12) -> None:
 
 
 def serve(port: int = 8765, open_browser: bool = True, preload: list[Path] | None = None,
-          exit_when_closed: bool | None = None) -> None:
+          exit_when_closed: bool | None = None, single_instance: bool = True) -> None:
+    if single_instance:
+        running = find_running_instance()
+        if running is not None and running.get("version") == __version__:
+            url = f"http://127.0.0.1:{running['port']}/?token={running['token']}"
+            print(f"Peak Alphaloop is already running; opening it.\n  Open: {url}", flush=True)
+            if open_browser:
+                webbrowser.open(url)
+            return
+        if running is not None:
+            # An older/newer copy (e.g. right after an update): ask it to close first.
+            print(f"Closing the running Peak Alphaloop {running.get('version')}.", flush=True)
+            _instance_request(running, "/api/quit", "POST")
+            for _ in range(40):
+                if find_running_instance() is None:
+                    break
+                time.sleep(0.25)
     remove_stale_workspaces()
     workspace = Workspace()
     for path in preload or []:
@@ -526,14 +609,22 @@ def serve(port: int = 8765, open_browser: bool = True, preload: list[Path] | Non
     server = None
     for candidate in range(port, port + 20):
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", candidate), make_handler(workspace, token))
+            server = LocalServer(("127.0.0.1", candidate), make_handler(workspace, token))
             break
         except OSError:
             continue
     if server is None:
         raise SystemExit(f"No free port between {port} and {port + 19}.")
-    server.daemon_threads = True
     url = f"http://127.0.0.1:{server.server_address[1]}/?token={token}"
+    record = instance_file() if single_instance else None
+    if record is not None:
+        try:
+            record.parent.mkdir(parents=True, exist_ok=True)
+            record.write_text(json.dumps({"port": server.server_address[1], "token": token,
+                                          "pid": os.getpid(), "version": __version__}),
+                              encoding="utf-8")
+        except OSError:
+            record = None
     print(f"Peak Alphaloop {__version__} is running.\n  Open: {url}\n  (Ctrl+C or the Quit "
           "button to stop)", flush=True)
     if exit_when_closed is None:
@@ -542,18 +633,23 @@ def serve(port: int = 8765, open_browser: bool = True, preload: list[Path] | Non
     if open_browser:
         threading.Timer(0.4, webbrowser.open, args=(url,)).start()
 
+    started = time.monotonic()
+
     def watchdog() -> None:
         while not workspace.stop.wait(5):
             seen = workspace.last_seen
-            if (exit_when_closed and seen is not None and not workspace.busy()
-                    and time.monotonic() - seen > IDLE_SHUTDOWN_SECONDS):
+            idle_since = seen if seen is not None else started
+            # Before any tab connects, allow longer (slow first launch, browser prompts).
+            limit = IDLE_SHUTDOWN_SECONDS if seen is not None else NEVER_CONNECTED_SECONDS
+            if (exit_when_closed and not workspace.busy()
+                    and time.monotonic() - idle_since > limit):
                 print("No browser window open; shutting down.", flush=True)
                 workspace.stop.set()
         server.shutdown()
 
     threading.Thread(target=watchdog, name="watchdog", daemon=True).start()
     for name in ("SIGTERM", "SIGHUP"):
-        if hasattr(signal, name):
+        if hasattr(signal, name) and threading.current_thread() is threading.main_thread():
             signal.signal(getattr(signal, name), lambda *_: workspace.stop.set())
     try:
         server.serve_forever()
@@ -563,6 +659,12 @@ def serve(port: int = 8765, open_browser: bool = True, preload: list[Path] | Non
         workspace.stop.set()
         server.server_close()
         workspace.close()
+        if record is not None:
+            try:
+                if json.loads(record.read_text(encoding="utf-8")).get("token") == token:
+                    record.unlink()
+            except (OSError, ValueError):
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -571,6 +673,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("videos", type=Path, nargs="*", help="Videos to open right away.")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true", help="Do not open a browser window.")
+    parser.add_argument("--new-instance", action="store_true",
+                        help="Start a separate copy even if one is already running.")
     parser.add_argument("--no-update-check", action="store_true",
                         help="Do not check GitHub for a newer release.")
     parser.add_argument("--self-test", metavar="REPORT", type=Path, nargs="?", const=Path("-"),
@@ -587,7 +691,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_update_check:
         os.environ["ALPHALOOP_NO_UPDATE_CHECK"] = "1"
     try:
-        serve(args.port, not args.no_browser, args.videos)
+        serve(args.port, not args.no_browser, args.videos,
+              single_instance=not args.new_instance and not args.videos)
     except MediaError as error:
         print(f"alphaloop: {error}", file=sys.stderr)
         return 1

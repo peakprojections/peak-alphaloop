@@ -170,3 +170,57 @@ class ServerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SingleInstanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import os
+        from unittest import mock
+        self.folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.folder, ignore_errors=True)
+        patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.folder),
+                                               "LOCALAPPDATA": str(self.folder),
+                                               "ALPHALOOP_NO_UPDATE_CHECK": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_second_launch_reuses_the_running_copy(self) -> None:
+        from unittest import mock
+        from peak_alphaloop import server as server_module
+        opened: list[str] = []
+        with mock.patch.object(server_module.webbrowser, "open", side_effect=opened.append), \
+                mock.patch.object(server_module, "state_dir", return_value=self.folder / "state"):
+            first = threading.Thread(target=server_module.serve,
+                                     kwargs={"port": 18765, "open_browser": False}, daemon=True)
+            first.start()
+            deadline = time.monotonic() + 10
+            while server_module.find_running_instance() is None and time.monotonic() < deadline:
+                time.sleep(0.1)
+            running = server_module.find_running_instance()
+            self.assertIsNotNone(running)
+            self.assertEqual(running["version"], server_module.__version__)
+
+            # A second launch must not start another server; it opens the first one.
+            started = time.monotonic()
+            server_module.serve(port=18765, open_browser=True)
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertEqual(opened, [f"http://127.0.0.1:{running['port']}/?token={running['token']}"])
+
+            server_module._instance_request(running, "/api/quit", "POST")
+            first.join(timeout=15)
+            self.assertFalse(first.is_alive())
+            self.assertIsNone(server_module.find_running_instance())
+            self.assertFalse((self.folder / "state" / "instance.json").exists())
+
+    def test_stale_link_shows_a_friendly_page(self) -> None:
+        workspace = Workspace(self.folder / "ws")
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(workspace, TOKEN))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/?token=old-token", timeout=10)
+        self.assertEqual(caught.exception.code, 403)
+        self.assertIn("text/html", caught.exception.headers["Content-Type"])
+        self.assertIn(b"expired", caught.exception.read())

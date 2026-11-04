@@ -45,6 +45,22 @@ def run(report_path: Path | None = None) -> int:
         if missing:
             raise RuntimeError(f"FFmpeg is missing encoders: {', '.join(missing)}")
 
+        # Two copies of the app must never be able to listen on the same port
+        # (Windows allows it with SO_REUSEADDR, which broke session links in 1.0.0).
+        from http.server import BaseHTTPRequestHandler
+        from .server import LocalServer
+        first = LocalServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        try:
+            try:
+                second = LocalServer(("127.0.0.1", first.server_address[1]), BaseHTTPRequestHandler)
+            except OSError:
+                checks["exclusive_port"] = True
+            else:
+                second.server_close()
+                raise RuntimeError("A second server could bind the same port.")
+        finally:
+            first.server_close()
+
         with tempfile.TemporaryDirectory(prefix="alphaloop-selftest-") as folder:
             work = Path(folder)
             source = work / "source.mp4"
