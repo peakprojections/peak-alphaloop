@@ -31,7 +31,7 @@ jobs:
         run: |
           import json, os
           # macos-15-intel is GitHub's last Intel Mac runner (supported until about August 2027).
-          runners = {"windows": "windows-latest", "macos": "macos-14",
+          runners = {"windows": "windows-latest", "macos": "macos-15",
                      "macos-intel": "macos-15-intel", "linux": "ubuntu-22.04"}
           wanted = [p.strip() for p in os.environ["REQUESTED"].split(",") if p.strip() in runners]
           include = [{"platform": p, "os": runners[p]} for p in wanted]
